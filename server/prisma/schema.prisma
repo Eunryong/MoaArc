@@ -1,0 +1,193 @@
+// ─── Prisma Schema — MoaArc Server ──────────────────────────────────────────
+//
+// 온체인 데이터(잔액·정산 상태)는 이 DB에 저장하지 않습니다.
+// DB는 오프체인 협업 데이터만 담습니다: 일정, 지출 기록, 분담 이력, 메모, 알림.
+//
+// ┌─ 개발 환경 (SQLite) ────────────────────────────────────────────────────────
+// │  schema.prisma provider = "sqlite"
+// │  DATABASE_URL="file:./server/prisma/dev.db"
+// │  bun run db:push  — 스키마 동기화 (마이그레이션 파일 없음)
+// │  주의: SQLite는 프로덕션에 적합하지 않습니다 (컨테이너 재시작 시 데이터 유실 가능).
+// │
+// └─ 프로덕션 환경 (PostgreSQL) ────────────────────────────────────────────────
+//    provider를 "postgresql"로 변경하고 클라이언트를 재생성해야 합니다:
+//    1. 이 파일에서 provider = "postgresql" 로 변경
+//    2. bun run db:generate  — 새 provider용 Prisma Client 재생성
+//    3. DATABASE_URL="postgresql://user:pass@host:5432/db?sslmode=require"
+//    4. bun run db:migrate  — 프로덕션 DB에 마이그레이션 적용
+//
+// NOTE: SQLite ↔ PostgreSQL은 provider 한 줄만 바꾸면 되는 것이 아닙니다.
+//       Prisma Client는 provider별로 컴파일되므로 2번(재생성)이 반드시 필요합니다.
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../../node_modules/.prisma/client"
+  binaryTargets = ["native"]
+}
+
+// 현재 설정: SQLite (로컬 개발 전용)
+// 프로덕션: provider = "postgresql" 로 변경 후 db:generate + db:migrate 실행
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── TripRecord ──────────────────────────────────────────────────────────────
+// 온체인 여행방의 오프체인 메타데이터 등록 기록.
+// chainId + contractAddress + onchainTripId 조합이 유니크 식별자.
+model TripRecord {
+  id              String   @id @default(cuid())
+  chainId         Int      // Arc Testnet = 5042002
+  contractAddress String   // 소문자 0x
+  onchainTripId   BigInt   // 컨트랙트의 uint256 tripId
+  name            String
+  adminAddress    String   // 소문자 0x
+  createTxHash    String   // createTrip 트랜잭션 해시
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  participants  ParticipantRecord[]
+  itinerary     ItineraryRecord[]
+  expenses      ExpenseRecord[]
+  notifications NotificationRecord[]
+
+  @@unique([chainId, contractAddress, onchainTripId])
+  @@index([adminAddress])
+}
+
+// ─── ParticipantRecord ───────────────────────────────────────────────────────
+model ParticipantRecord {
+  id          String @id @default(cuid())
+  tripId      String
+  address     String // 소문자 0x
+  displayName String
+  isAdmin     Boolean @default(false)
+
+  trip TripRecord @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@unique([tripId, address])
+  @@index([address])
+}
+
+// ─── AuthNonce ───────────────────────────────────────────────────────────────
+// 지갑 서명 인증용 일회성 nonce
+model AuthNonce {
+  id        String   @id @default(cuid())
+  address   String   // 소문자 0x
+  nonce     String   @unique
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([address])
+}
+
+// ─── ItineraryRecord ─────────────────────────────────────────────────────────
+model ItineraryRecord {
+  id          String   @id @default(cuid())
+  tripId      String
+  date        String   // YYYY-MM-DD
+  time        String?  // HH:MM
+  location    String
+  activity    String
+  participants String  // JSON array of wallet addresses
+  status      String   @default("draft") // draft | confirmed | cancelled
+  notes       String?
+  // 비용 견적 (에이전트 제안 또는 수동 입력)
+  estMinUsdc  BigInt?  // 마이크로USDC
+  estMaxUsdc  BigInt?  // 마이크로USDC
+  estCurrency String?  // 현지 통화 코드
+  estSource   String?  // 출처 URL
+  estAt       DateTime? // 조사 시각
+  confidence  String?  // high | medium | low | none
+  createdBy   String   // 지갑 주소
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  trip TripRecord @relation(fields: [tripId], references: [id], onDelete: Cascade)
+}
+
+// ─── ExpenseRecord ───────────────────────────────────────────────────────────
+// 수동 입력 지출 기록 — 외부 카드/결제 검증이 아님
+model ExpenseRecord {
+  id              String   @id @default(cuid())
+  tripId          String
+  payerAddress    String   // 결제자 지갑 주소
+  title           String
+  category        String   // 식비|숙박|교통|기타
+  date            String   // YYYY-MM-DD
+  localCurrency   String?
+  localAmount     Float?
+  totalUsdc       BigInt   // 마이크로USDC
+  paymentFlow     String   // community_release | personal_prepaid
+  currentVersion  Int      @default(1)
+  status          String   @default("승인대기") // 승인대기|확정|수정안투표중|취소됨
+  receiptNote     String?  // 사용자 제공 증빙 메모 (검증 없음)
+  createdBy       String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  trip      TripRecord        @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  versions  ExpenseVersion[]
+}
+
+// ─── ExpenseVersion ──────────────────────────────────────────────────────────
+model ExpenseVersion {
+  id          String   @id @default(cuid())
+  expenseId   String
+  version     Int
+  shares      String   // JSON: [{address, amountUsdc}]
+  proposedBy  String   // 지갑 주소 (관리자만 가능)
+  proposedAt  DateTime @default(now())
+  reason      String   @default("")
+  status      String   @default("승인대기")
+
+  expense   ExpenseRecord      @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  approvals ExpenseApproval[]
+
+  @@unique([expenseId, version])
+}
+
+// ─── ExpenseApproval ─────────────────────────────────────────────────────────
+model ExpenseApproval {
+  id         String   @id @default(cuid())
+  versionId  String
+  address    String   // 지갑 주소
+  action     String   // 승인|수정요청
+  reason     String?
+  approvedAt DateTime @default(now())
+
+  version ExpenseVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@unique([versionId, address])
+}
+
+// ─── AgentConversation ───────────────────────────────────────────────────────
+// Gemini 에이전트 대화 — TESTNET 모드 전용
+model AgentConversation {
+  id        String   @id @default(cuid())
+  tripId    String   // TripRecord.id (nullable: 여행방 없을 때도 가능)
+  address   String   // 요청한 지갑 주소
+  role      String   // user | agent
+  content   String
+  hasError  Boolean  @default(false)
+  // 에이전트가 제안한 일정 초안 (사용자 미확인 = 미확정)
+  proposal  String?  // JSON (ItineraryDraft[] | null)
+  createdAt DateTime @default(now())
+}
+
+// ─── NotificationRecord ──────────────────────────────────────────────────────
+model NotificationRecord {
+  id        String   @id @default(cuid())
+  tripId    String
+  address   String   // 수신 지갑 주소
+  type      String   // budget_alert | approval_request | expense_changed | settlement_proposed
+  title     String
+  body      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  trip TripRecord @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([address, read])
+}
