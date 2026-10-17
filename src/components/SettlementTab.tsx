@@ -16,9 +16,10 @@ interface Props {
   onTripUpdate: (t: Trip) => void;
   demoMode?: boolean;
   connectedAddress?: `0x${string}`;
+  isWrongChain?: boolean;
 }
 
-export default function SettlementTab({ trip, currentUserId, onTripUpdate }: Props) {
+export default function SettlementTab({ trip, currentUserId, onTripUpdate, demoMode, isWrongChain }: Props) {
   const isAdmin = trip.participants.find((p) => p.id === currentUserId)?.isAdmin ?? false;
   const pendingCount = getPendingExpenseCount(trip);
   const contractBalance = getContractBalance(trip);

@@ -29,9 +29,11 @@ interface Props {
   onTripUpdate: (t: Trip) => void;
   demoMode: boolean;
   connectedAddress?: `0x${string}`;
+  /** TESTNET: Arc Testnet이 아닌 체인에 연결됐을 때 true */
+  isWrongChain?: boolean;
 }
 
-export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMode, connectedAddress: _connectedAddress }: Props) {
+export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMode, connectedAddress: _connectedAddress, isWrongChain }: Props) {
   const [depositInput, setDepositInput] = useState("");
   const [depositMsg, setDepositMsg] = useState("");
   const [releaseInput, setReleaseInput] = useState("");
@@ -236,8 +238,9 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
           />
           <button
             onClick={() => { void handleDeposit(); }}
-            disabled={!demoMode && depositHook.state.status === "pending"}
-            className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50"
+            disabled={(!demoMode && depositHook.state.status === "pending") || (!demoMode && !!isWrongChain)}
+            title={isWrongChain && !demoMode ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             입금
           </button>
@@ -301,8 +304,9 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
               />
               <button
                 onClick={() => { void handleRelease(); }}
-                disabled={!demoMode && releaseHook.state.status === "pending"}
-                className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors whitespace-nowrap disabled:opacity-50"
+                disabled={(!demoMode && releaseHook.state.status === "pending") || (!demoMode && !!isWrongChain)}
+                title={isWrongChain && !demoMode ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 이체
               </button>
@@ -336,8 +340,9 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
             />
             <button
               onClick={() => { void handleReturn(); }}
-              disabled={!demoMode && returnHook.state.status === "pending"}
-              className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700 transition-colors disabled:opacity-50"
+              disabled={(!demoMode && returnHook.state.status === "pending") || (!demoMode && !!isWrongChain)}
+              title={isWrongChain && !demoMode ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+              className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               반납
             </button>

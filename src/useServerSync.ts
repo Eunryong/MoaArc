@@ -10,10 +10,13 @@ import { useState, useEffect, useCallback } from "react";
 import {
   getHealth,
   listMyTrips,
+  listMyTripsWithToken,
   getItinerary,
   getExpenses,
   getNotifications,
   getToken,
+  clearToken,
+  ApiError,
   type TripApiRecord,
   type ItineraryApiItem,
   type ExpenseApiRecord,
@@ -48,38 +51,58 @@ export function useServerHealth() {
 
 export function useAuthState() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => !!getToken());
+  // 만료 구분: 토큰이 있었지만 서버가 401을 반환한 경우
+  const [isExpired, setIsExpired] = useState(false);
 
-  // 토큰이 갱신되면 상태 업데이트
   const refresh = useCallback(() => {
     setIsAuthenticated(!!getToken());
+    setIsExpired(false); // 새 토큰 저장 후 만료 해제
   }, []);
 
-  return { isAuthenticated, refresh };
+  const markExpired = useCallback(() => {
+    clearToken();
+    setIsAuthenticated(false);
+    setIsExpired(true);
+  }, []);
+
+  return { isAuthenticated, isExpired, refresh, markExpired };
 }
 
 // ─── 내 여행방 목록 ───────────────────────────────────────────────────────────
 
-export function useMyTrips(enabled: boolean) {
+export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
   const [trips, setTrips] = useState<TripApiRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 요청이 실제 성공(200)했는지 — true여야만 빈 배열을 "없음"으로 표시
+  const [loadedOnce, setLoadedOnce] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!enabled || !getToken()) return;
+  // explicitToken: 로그인 직후 React state 반영 전에 발급된 토큰을 직접 전달
+  const load = useCallback(async (explicitToken?: string) => {
+    if (!explicitToken && !getToken()) return;
     setLoading(true);
     setError(null);
     try {
-      const data = await listMyTrips();
+      const data = explicitToken
+        ? await listMyTripsWithToken(explicitToken)
+        : await listMyTrips();
       setTrips(data);
+      setLoadedOnce(true);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (e instanceof ApiError && e.status === 401) {
+        onAuthExpired?.();
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setLoading(false);
     }
-  }, [enabled]);
+  }, [onAuthExpired]);
 
-  useEffect(() => { void load(); }, [load]);
-  return { trips, loading, error, reload: load };
+  // 자동 실행: enabled가 true로 바뀔 때(isAuthenticated 반영 후)
+  useEffect(() => { if (enabled) void load(); }, [enabled, load]);
+  // reload(token?): 인수 없으면 sessionStorage 토큰 사용, 있으면 직접 전달
+  return { trips, loading, error, loadedOnce, reload: load };
 }
 
 // ─── 여행방 일정 ─────────────────────────────────────────────────────────────

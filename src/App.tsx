@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useAccount, useChainId, useSignMessage } from "wagmi";
 import { ConnectKitButton } from "connectkit";
 import { arcTestnet } from "viem/chains";
@@ -16,6 +16,7 @@ import {
 import {
   fetchNonce,
   verifySignature,
+  listMyTripsWithToken,
   clearToken,
   type TripApiRecord,
 } from "./apiClient";
@@ -94,16 +95,17 @@ export default function App() {
 
   // ─── 서버 상태 ─────────────────────────────────────────────────────────
   const { serverOnline, geminiConfigured, checking: serverChecking } = useServerHealth();
-  const { isAuthenticated, refresh: refreshAuth } = useAuthState();
+  const { isAuthenticated, isExpired, refresh: refreshAuth, markExpired } = useAuthState();
 
   // ─── 여행방 목록 (TESTNET) ─────────────────────────────────────────────
-  // 서버 온라인 + 인증됨일 때만 활성화
+  // 서버 온라인 + 인증됨일 때만 활성화. 401 발생 시 markExpired 호출
   const {
     trips: serverTrips,
     loading: tripsLoading,
     error: tripsError,
+    loadedOnce: tripsLoadedOnce,
     reload: reloadTrips,
-  } = useMyTrips(!demoMode && serverOnline && isAuthenticated);
+  } = useMyTrips(!demoMode && serverOnline && isAuthenticated, markExpired);
 
   // ─── 선택된 여행방 일정·지출 (TESTNET) ────────────────────────────────
   const {
@@ -192,14 +194,27 @@ export default function App() {
   }, [demoMode, serverItinerary, serverExpenses]);
 
   // ─── 지갑 주소 변경 시 TESTNET 데이터 초기화 ──────────────────────────
+  // address ref: 실제 주소가 달라진 경우에만 토큰을 삭제한다.
+  // 같은 지갑에서 체인만 전환되면 wagmi가 일시적으로 address를 undefined로 내보낼 수 있으므로
+  // undefined → 주소 복귀 시에는 clearToken을 하지 않는다.
+  const prevAddressRef = useRef<string | undefined>(address);
   useEffect(() => {
+    const prev = prevAddressRef.current;
+    prevAddressRef.current = address;
+
     if (demoMode) return;
-    clearToken();
-    refreshAuth();
-    setTestnetTrip(null);
-    setSelectedDbTripId(null);
-    setTestnetAgentMessages([]);
-    setAuthError(null);
+
+    // undefined → undefined: 아무 변화 없음
+    // 주소A → undefined: 체인 전환 중 일시적 undefined일 수 있으므로 토큰 보존
+    // 주소A → 주소B: 실제 계정 전환 → 토큰 삭제
+    if (prev && address && prev.toLowerCase() !== address.toLowerCase()) {
+      clearToken();
+      refreshAuth();
+      setTestnetTrip(null);
+      setSelectedDbTripId(null);
+      setTestnetAgentMessages([]);
+      setAuthError(null);
+    }
   }, [address, demoMode, refreshAuth]);
 
   // ─── 지갑 서명 로그인 ─────────────────────────────────────────────────
@@ -210,9 +225,12 @@ export default function App() {
     try {
       const nonce = await fetchNonce(address);
       const signature = await signMessageAsync({ message: nonce });
-      await verifySignature(address, nonce, signature);
+      // verifySignature가 saveToken()을 호출해 sessionStorage에 토큰 저장 후 토큰을 반환
+      const newToken = await verifySignature(address, nonce, signature);
+      // refreshAuth: React state 업데이트 (비동기 — 이 줄 이후 isAuthenticated는 아직 false일 수 있음)
       refreshAuth();
-      await reloadTrips();
+      // 발급된 토큰을 reloadTrips에 직접 전달 — sessionStorage/state 타이밍 의존성 완전 제거
+      await reloadTrips(newToken);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("User rejected") || msg.includes("user rejected")) {
@@ -288,7 +306,8 @@ export default function App() {
                 </a>
               </p>
             </div>
-            <ConnectKitButton />
+            {/* DEMO 모드에서는 실제 지갑 연결 버튼 숨김 */}
+            {!demoMode && <ConnectKitButton />}
           </div>
 
           {/* 체인 경고 */}
@@ -298,20 +317,30 @@ export default function App() {
             </div>
           )}
 
-          {/* TESTNET 로그인 UI */}
+          {/* TESTNET 로그인 UI (최초 로그인 + 만료 재인증 공통) */}
           {!demoMode && isConnected && !isWrongChain && !isAuthenticated && serverOnline && (
-            <div className="mb-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 flex items-center justify-between">
-              <span className="text-xs text-indigo-700">
+            <div className={`mb-2 border rounded-lg px-3 py-2 flex items-center justify-between ${
+              isExpired
+                ? "bg-amber-50 border-amber-200"
+                : "bg-indigo-50 border-indigo-200"
+            }`}>
+              <span className={`text-xs ${isExpired ? "text-amber-700" : "text-indigo-700"}`}>
                 {authLoading
                   ? "지갑에서 서명 요청을 확인해주세요…"
-                  : "서버에 로그인하려면 지갑으로 서명하세요."}
+                  : isExpired
+                    ? "로그인이 만료됐습니다. 다시 서명해주세요."
+                    : "서버에 로그인하려면 지갑으로 서명하세요."}
               </span>
               <button
                 onClick={() => { void handleWalletLogin(); }}
                 disabled={authLoading}
-                className="ml-3 px-3 py-1 rounded-full text-xs font-semibold bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                className={`ml-3 px-3 py-1 rounded-full text-xs font-semibold text-white disabled:opacity-50 ${
+                  isExpired
+                    ? "bg-amber-600 hover:bg-amber-700"
+                    : "bg-indigo-600 hover:bg-indigo-700"
+                }`}
               >
-                {authLoading ? "서명 중…" : "지갑 서명으로 로그인"}
+                {authLoading ? "서명 중…" : isExpired ? "지갑으로 다시 인증" : "지갑 서명으로 로그인"}
               </button>
             </div>
           )}
@@ -446,8 +475,29 @@ export default function App() {
           </div>
         )}
 
-        {/* TESTNET — 서버 온라인, 미인증 */}
-        {!demoMode && serverOnline && !isAuthenticated && !authLoading && (
+        {/* TESTNET — 인증 만료 (토큰이 있었으나 서버가 401 반환) */}
+        {!demoMode && serverOnline && isExpired && !authLoading && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center mt-4">
+            <p className="text-2xl mb-2">⏱️</p>
+            <h2 className="text-base font-semibold text-amber-800 mb-1">로그인이 만료되었습니다</h2>
+            <p className="text-sm text-amber-700 mb-4">
+              지갑 연결은 유지됩니다. 다시 서명하면 여행방 목록을 불러옵니다.
+            </p>
+            <button
+              onClick={() => { void handleWalletLogin(); }}
+              disabled={authLoading || !isConnected}
+              className="px-4 py-2 rounded-full text-sm font-semibold bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+            >
+              지갑으로 다시 인증
+            </button>
+            {!isConnected && (
+              <p className="text-xs text-amber-600 mt-2">지갑을 먼저 연결해주세요.</p>
+            )}
+          </div>
+        )}
+
+        {/* TESTNET — 서버 온라인, 미인증 (만료가 아닌 최초 미로그인) */}
+        {!demoMode && serverOnline && !isAuthenticated && !isExpired && !authLoading && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
             <p className="text-2xl mb-3">🔑</p>
             <h2 className="text-base font-semibold text-stone-700 mb-2">로그인이 필요합니다</h2>
@@ -464,16 +514,18 @@ export default function App() {
           <div className="text-center py-12 text-stone-400 text-sm">여행방 목록 불러오는 중…</div>
         )}
 
-        {/* TESTNET — 인증됨, 여행방 오류 */}
-        {!demoMode && serverOnline && isAuthenticated && tripsError && (
+        {/* TESTNET — 인증됨, 여행방 일반 오류 (401 제외) */}
+        {!demoMode && serverOnline && isAuthenticated && !tripsLoading && tripsError && (
           <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 mt-4 text-xs text-rose-700">
             여행방 목록 오류: {tripsError}
+            {/* 재시도는 만료 토큰 없이 유효한 토큰으로만 실행 */}
             <button onClick={() => { void reloadTrips(); }} className="ml-2 underline">재시도</button>
           </div>
         )}
 
-        {/* TESTNET — 인증됨, 여행방 없음 */}
-        {!demoMode && serverOnline && isAuthenticated && !tripsLoading && !trip && (
+        {/* TESTNET — 인증됨, 200 응답 후 빈 배열 — 요청 성공했을 때만 표시 */}
+        {!demoMode && serverOnline && isAuthenticated && !tripsLoading && !tripsError
+          && tripsLoadedOnce && !trip && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
             <p className="text-2xl mb-3">🗺️</p>
             <h2 className="text-base font-semibold text-stone-700 mb-2">참여한 여행방이 없습니다</h2>
@@ -494,7 +546,8 @@ export default function App() {
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
             demoMode={demoMode}
-            connectedAddress={address}
+            connectedAddress={demoMode ? undefined : address}
+            isWrongChain={!demoMode && isWrongChain}
           />
         )}
         {trip && activeTab === "my" && (
@@ -513,7 +566,8 @@ export default function App() {
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
             demoMode={demoMode}
-            connectedAddress={address}
+            connectedAddress={demoMode ? undefined : address}
+            isWrongChain={!demoMode && isWrongChain}
           />
         )}
         {activeTab === "itinerary" && (

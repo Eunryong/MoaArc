@@ -13,7 +13,10 @@
  * 토큰은 sessionStorage에 보관합니다 (탭 닫으면 만료).
  */
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://localhost:3001";
+// 상대경로 "" 사용 → Vite proxy(/api → localhost:3001)로 전달
+// 절대 주소(http://localhost:3001)를 쓰지 말 것 — Arc Studio 프리뷰에서 브라우저가 도달 불가
+// 배포 시: VITE_API_BASE_URL에 외부 서버 주소 설정
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 const TOKEN_KEY = "moaarc_auth_token";
 
 // ─── 토큰 관리 ────────────────────────────────────────────────────────────────
@@ -32,8 +35,9 @@ export function clearToken() {
 
 // ─── 기본 fetch 래퍼 ────────────────────────────────────────────────────────
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = getToken();
+async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: string): Promise<T> {
+  // explicitToken이 있으면 우선 사용 — 로그인 직후 React state 반영 전 stale closure 방지
+  const token = explicitToken ?? getToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -45,6 +49,18 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   if (res.status === 401) {
     clearToken();
     throw new ApiError(401, "인증이 만료되었습니다. 다시 로그인해주세요.");
+  }
+
+  // Content-Type 확인: HTML 응답을 JSON 파싱하지 않도록 방지
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    const text = await res.text();
+    throw new ApiError(
+      res.status,
+      res.ok
+        ? `예상치 못한 응답 형식 (${contentType || "unknown"})`
+        : `서버 오류 ${res.status}: ${text.slice(0, 120)}`
+    );
   }
 
   const body = await res.json() as Record<string, unknown>;
@@ -134,6 +150,12 @@ export async function registerTrip(payload: {
 
 export async function listMyTrips(): Promise<TripApiRecord[]> {
   const data = await apiFetch<{ trips: TripApiRecord[] }>("/api/trips");
+  return data.trips;
+}
+
+/** 로그인 직후 발급된 토큰을 명시적으로 전달 — sessionStorage 타이밍 의존성 제거 */
+export async function listMyTripsWithToken(token: string): Promise<TripApiRecord[]> {
+  const data = await apiFetch<{ trips: TripApiRecord[] }>("/api/trips", undefined, token);
   return data.trips;
 }
 

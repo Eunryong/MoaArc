@@ -23,7 +23,7 @@ const JWT_SECRET = (() => {
 })();
 
 const NONCE_TTL_MS = 5 * 60 * 1000; // 5분
-const TOKEN_TTL = "24h";
+const TOKEN_TTL = (process.env.JWT_EXPIRY ?? "24h") as string;
 
 // ─── Nonce 발급 ──────────────────────────────────────────────────────────────
 

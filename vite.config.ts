@@ -37,5 +37,14 @@ export default defineConfig({
   server: {
     allowedHosts: true,
     cors: true,
+    proxy: {
+      // /api 요청을 백엔드 포트 3001로 전달
+      // 브라우저는 프리뷰 호스트의 /api 경로만 사용하므로 CORS 없이 통신
+      '/api': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+        rewrite: (path) => path,
+      },
+    },
   },
 })
