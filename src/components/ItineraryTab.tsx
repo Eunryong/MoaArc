@@ -17,7 +17,6 @@ import type {
   CostEstimateConfidence,
   Expense,
   ExpenseVersion,
-  ExpenseCategory,
 } from "../types";
 import { fmtUsdc } from "../calculations";
 
@@ -25,12 +24,11 @@ interface Props {
   trip: Trip | null;
   currentUserId: ParticipantId;
   onTripUpdate: (t: Trip) => void;
-  demoMode: boolean;
   agentMessages: AgentMessage[];
   onAgentMessagesUpdate: (msgs: AgentMessage[]) => void;
-  /** TESTNET 전용: DB 여행방 ID */
+  /** DB 여행방 ID */
   dbTripId?: string | null;
-  /** TESTNET 전용: 일정 새로고침 콜백 */
+  /** 일정 새로고침 콜백 */
   onItineraryReload?: () => void | Promise<void>;
 }
 
@@ -347,7 +345,6 @@ export default function ItineraryTab({
   trip,
   currentUserId,
   onTripUpdate,
-  demoMode,
   agentMessages,
   onAgentMessagesUpdate,
   dbTripId,
@@ -457,13 +454,8 @@ export default function ItineraryTab({
     onAgentMessagesUpdate(newMsgs);
     setInputText("");
 
-    if (demoMode) {
-      // DEMO: 사전 정의 응답
-      setTimeout(() => { handleDemoAgentResponse(text, newMsgs); }, 600);
-    } else {
-      // TESTNET: 서버 API 호출
-      void handleTestnetAgentRequest(text, newMsgs);
-    }
+    // 서버 API 호출
+    void handleTestnetAgentRequest(text, newMsgs);
   }
 
   // TESTNET 전용: 서버 /api/agent/chat 호출
@@ -566,44 +558,6 @@ export default function ItineraryTab({
     }
   }
 
-  // 시연 모드 응답 패턴
-  function handleDemoAgentResponse(text: string, msgs: AgentMessage[]) {
-    const lower = text.toLowerCase();
-    let response = "";
-
-    if (lower.includes("예산") || lower.includes("비용") || lower.includes("얼마")) {
-      const totalMin = nonNullTrip.itinerary
-        .filter((i) => i.status === "confirmed" && i.costEstimate)
-        .reduce((s, i) => s + (i.costEstimate?.minAmount ?? 0n), 0n);
-      const totalMax = nonNullTrip.itinerary
-        .filter((i) => i.status === "confirmed" && i.costEstimate)
-        .reduce((s, i) => s + (i.costEstimate?.maxAmount ?? 0n), 0n);
-      response = `현재 확정 일정 기준 예상 비용 범위:\n• 최솟값: ${fmtUsdc(totalMin)} USDC\n• 최댓값: ${fmtUsdc(totalMax)} USDC\n\n⚠️ 시연 데이터 기준 — 실제 검색이 아닙니다. 실제 환율과 가격은 다를 수 있습니다.`;
-    } else if (lower.includes("일정") || lower.includes("계획")) {
-      const confirmed = nonNullTrip.itinerary.filter((i) => i.status === "confirmed").length;
-      const drafts = nonNullTrip.itinerary.filter((i) => i.status === "draft").length;
-      response = `현재 일정 현황:\n• 확정: ${confirmed}개\n• 초안 (확인 대기): ${drafts}개\n\n초안 일정을 확정하려면 관리자(A)가 각 항목에서 "일정 확정" 버튼을 눌러주세요.`;
-    } else if (lower.includes("지출") || lower.includes("사용")) {
-      const totalConfirmed = nonNullTrip.expenses
-        .filter((e) => {
-          const ver = e.versions.find((v) => v.version === e.currentVersion);
-          return ver?.status === "확정";
-        })
-        .reduce((s, e) => s + e.totalAmount, 0n);
-      response = `확정된 실제 지출 합계: ${fmtUsdc(totalConfirmed)} USDC\n\n지출 목록 탭에서 개별 항목 승인 현황을 확인할 수 있습니다.`;
-    } else {
-      response = `"${text}"에 대해 처리하려면 실제 Gemini API 연동이 필요합니다.\n\n현재 시연 모드에서는:\n• 일정 확정/취소 (관리자)\n• 예산/지출 현황 조회\n• 분담안 승인 (지출 목록 탭)\n기능만 사용 가능합니다.`;
-    }
-
-    const agentMsg: AgentMessage = {
-      id: `msg-${String(Date.now())}-a`,
-      role: "agent",
-      content: response,
-      timestamp: new Date().toISOString(),
-    };
-    onAgentMessagesUpdate([...msgs, agentMsg]);
-  }
-
   const activeItinerary = nonNullTrip.itinerary.filter((i) => i.status !== "cancelled");
 
   return (
@@ -642,11 +596,6 @@ export default function ItineraryTab({
             <h3 className="text-sm font-semibold text-stone-700">
               일정 ({activeItinerary.length}개)
             </h3>
-            {demoMode && (
-              <span className="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                시연 데이터
-              </span>
-            )}
           </div>
 
           {activeItinerary.length === 0 ? (
@@ -685,12 +634,10 @@ export default function ItineraryTab({
       {activeView === "chat" && (
         <div className="flex flex-col" style={{ height: "520px" }}>
           {/* API 상태 안내 */}
-          {!demoMode && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-xs text-amber-700 mb-3">
-              <strong>서버 API 미구성</strong> — 실제 Gemini 검색을 사용하려면 서버에
-              GEMINI_API_KEY 설정이 필요합니다. 현재 응답은 로컬 처리입니다.
-            </div>
-          )}
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-xs text-amber-700 mb-3">
+            <strong>서버 API 필요</strong> — 실제 Gemini 검색을 사용하려면 서버에
+            GEMINI_API_KEY 설정이 필요합니다. 미설정 시 로컬 처리로 응답합니다.
+          </div>
 
           {/* 메시지 목록 */}
           <div className="flex-1 overflow-y-auto bg-white border border-stone-200 rounded-xl p-3 mb-3">

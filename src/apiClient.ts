@@ -46,15 +46,15 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
 
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
 
-  if (res.status === 401) {
-    clearToken();
-    throw new ApiError(401, "인증이 만료되었습니다. 다시 로그인해주세요.");
-  }
-
-  // Content-Type 확인: HTML 응답을 JSON 파싱하지 않도록 방지
+  // ── Content-Type 먼저 확인: HTML(502/504 등)을 JSON으로 파싱하지 않도록 방지 ──
+  // 401이라도 서버가 JSON을 반환할 수 있으므로 Content-Type 체크를 우선합니다.
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) {
     const text = await res.text();
+    if (res.status === 401) {
+      // JSON이 아닌 401(프록시/게이트웨이 에러) — 토큰 미삭제, 사용자가 재시도 가능
+      throw new ApiError(401, `서버 게이트웨이 오류 (HTTP 401, 비-JSON 응답)`);
+    }
     throw new ApiError(
       res.status,
       res.ok
@@ -64,6 +64,15 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   }
 
   const body = await res.json() as Record<string, unknown>;
+
+  if (res.status === 401) {
+    // JSON 401: 서버 응답 메시지로 원인 구분
+    const serverMsg = (body.error as string) ?? "";
+    // "인증이 필요합니다." = Authorization 헤더 없음 (토큰 미전달)
+    // "유효하지 않거나 만료된 토큰입니다." = 토큰 서명/만료 검증 실패
+    clearToken();
+    throw new ApiError(401, serverMsg || "인증이 필요합니다. 다시 로그인해주세요.");
+  }
 
   if (!res.ok) {
     throw new ApiError(res.status, (body.error as string) ?? "알 수 없는 오류");

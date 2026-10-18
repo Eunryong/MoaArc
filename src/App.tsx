@@ -2,9 +2,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useAccount, useChainId, useSignMessage } from "wagmi";
 import { ConnectKitButton } from "connectkit";
 import { arcTestnet } from "viem/chains";
-import type { ParticipantId, Trip, AgentMessage, AppMode, ExpenseCategory, CostEstimateConfidence } from "./types";
+import type { ParticipantId, Trip, AgentMessage, ExpenseCategory } from "./types";
 import { calcParticipantSummary } from "./calculations";
-import { DEMO_TRIP, DEMO_AGENT_MESSAGES } from "./demoData";
 import { MOAARK_ADDRESS } from "./contractAbi";
 import {
   useServerHealth,
@@ -16,11 +15,9 @@ import {
 import {
   fetchNonce,
   verifySignature,
-  listMyTripsWithToken,
   clearToken,
   type TripApiRecord,
 } from "./apiClient";
-import UserSwitcher from "./components/UserSwitcher";
 import TopSummaryBar from "./components/TopSummaryBar";
 import DashboardTab from "./components/DashboardTab";
 import MyExpensesTab from "./components/MyExpensesTab";
@@ -68,23 +65,12 @@ function apiRecordToTrip(r: TripApiRecord): Trip {
 }
 
 export default function App() {
-  // ─── 모드 ──────────────────────────────────────────────────────────────
-  const [appMode, setAppMode] = useState<AppMode>("demo");
-  const demoMode = appMode === "demo";
-
-  // ─── DEMO 상태 ─────────────────────────────────────────────────────────
-  const [demoTrip, setDemoTrip] = useState<Trip>(DEMO_TRIP);
-  const [demoAgentMessages, setDemoAgentMessages] = useState<AgentMessage[]>(
-    DEMO_AGENT_MESSAGES as AgentMessage[]
-  );
-  const [currentDemoUserId, setCurrentDemoUserId] = useState<ParticipantId>("A");
-
   // ─── TESTNET 상태 ──────────────────────────────────────────────────────
   const [selectedDbTripId, setSelectedDbTripId] = useState<string | null>(null);
-  const [testnetTrip, setTestnetTrip] = useState<Trip | null>(null);
+  const [trip, setTrip] = useState<Trip | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [testnetAgentMessages, setTestnetAgentMessages] = useState<AgentMessage[]>([]);
+  const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([]);
 
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
 
@@ -97,7 +83,7 @@ export default function App() {
   const { serverOnline, geminiConfigured, checking: serverChecking } = useServerHealth();
   const { isAuthenticated, isExpired, refresh: refreshAuth, markExpired } = useAuthState();
 
-  // ─── 여행방 목록 (TESTNET) ─────────────────────────────────────────────
+  // ─── 여행방 목록 ───────────────────────────────────────────────────────
   // 서버 온라인 + 인증됨일 때만 활성화. 401 발생 시 markExpired 호출
   const {
     trips: serverTrips,
@@ -105,61 +91,56 @@ export default function App() {
     error: tripsError,
     loadedOnce: tripsLoadedOnce,
     reload: reloadTrips,
-  } = useMyTrips(!demoMode && serverOnline && isAuthenticated, markExpired);
+  } = useMyTrips(serverOnline && isAuthenticated, markExpired);
 
-  // ─── 선택된 여행방 일정·지출 (TESTNET) ────────────────────────────────
+  // ─── 선택된 여행방 일정·지출 ───────────────────────────────────────────
   const {
     items: serverItinerary,
     reload: reloadItinerary,
   } = useTripItinerary(
     selectedDbTripId,
-    !demoMode && serverOnline && isAuthenticated && !!selectedDbTripId
+    serverOnline && isAuthenticated && !!selectedDbTripId
   );
   const {
     expenses: serverExpenses,
-    reload: _reloadExpenses,
   } = useTripExpenses(
     selectedDbTripId,
-    !demoMode && serverOnline && isAuthenticated && !!selectedDbTripId
+    serverOnline && isAuthenticated && !!selectedDbTripId
   );
 
   // ─── 여행방 목록 → 최초 선택 ──────────────────────────────────────────
   useEffect(() => {
-    if (demoMode) return;
     if (serverTrips.length > 0 && !selectedDbTripId) {
       setSelectedDbTripId(serverTrips[0].id);
     }
-  }, [demoMode, serverTrips, selectedDbTripId]);
+  }, [serverTrips, selectedDbTripId]);
 
-  // ─── 선택된 여행방 → testnetTrip 갱신 ─────────────────────────────────
+  // ─── 선택된 여행방 → trip 갱신 ────────────────────────────────────────
   useEffect(() => {
-    if (demoMode) return;
     if (!selectedDbTripId) {
-      setTestnetTrip(null);
+      setTrip(null);
       return;
     }
     const found = serverTrips.find((t) => t.id === selectedDbTripId);
     if (found) {
-      setTestnetTrip((prev) => {
+      setTrip((prev) => {
         const base = apiRecordToTrip(found);
-        // 이미 있는 여행방 데이터를 보존하면서 갱신
         if (prev?.id === found.id) {
           return { ...prev, name: base.name, participants: base.participants };
         }
         return base;
       });
     }
-  }, [demoMode, selectedDbTripId, serverTrips]);
+  }, [selectedDbTripId, serverTrips]);
 
-  // ─── 서버 일정/지출 → testnetTrip 병합 ────────────────────────────────
+  // ─── 서버 일정/지출 → trip 병합 ───────────────────────────────────────
   useEffect(() => {
-    if (demoMode || !testnetTrip) return;
+    if (!trip) return;
     if (serverItinerary.length > 0 || serverExpenses.length > 0) {
-      setTestnetTrip((prev) => {
+      setTrip((prev) => {
         if (!prev) return prev;
         return {
           ...prev,
-          // 일정 병합: API 데이터를 ItineraryItem으로 변환
           itinerary: serverItinerary.map((i) => ({
             id: i.id,
             tripId: selectedDbTripId ?? "",
@@ -191,10 +172,10 @@ export default function App() {
         };
       });
     }
-  }, [demoMode, serverItinerary, serverExpenses]);
+  }, [serverItinerary, serverExpenses, selectedDbTripId]);
 
-  // ─── 지갑 주소 변경 시 TESTNET 데이터 초기화 ──────────────────────────
-  // address ref: 실제 주소가 달라진 경우에만 토큰을 삭제한다.
+  // ─── 지갑 주소 변경 시 데이터 초기화 ──────────────────────────────────
+  // address ref: 실제 주소가 달라진 경우(A→B)에만 토큰을 삭제한다.
   // 같은 지갑에서 체인만 전환되면 wagmi가 일시적으로 address를 undefined로 내보낼 수 있으므로
   // undefined → 주소 복귀 시에는 clearToken을 하지 않는다.
   const prevAddressRef = useRef<string | undefined>(address);
@@ -202,20 +183,15 @@ export default function App() {
     const prev = prevAddressRef.current;
     prevAddressRef.current = address;
 
-    if (demoMode) return;
-
-    // undefined → undefined: 아무 변화 없음
-    // 주소A → undefined: 체인 전환 중 일시적 undefined일 수 있으므로 토큰 보존
-    // 주소A → 주소B: 실제 계정 전환 → 토큰 삭제
     if (prev && address && prev.toLowerCase() !== address.toLowerCase()) {
       clearToken();
       refreshAuth();
-      setTestnetTrip(null);
+      setTrip(null);
       setSelectedDbTripId(null);
-      setTestnetAgentMessages([]);
+      setAgentMessages([]);
       setAuthError(null);
     }
-  }, [address, demoMode, refreshAuth]);
+  }, [address, refreshAuth]);
 
   // ─── 지갑 서명 로그인 ─────────────────────────────────────────────────
   const handleWalletLogin = useCallback(async () => {
@@ -243,43 +219,17 @@ export default function App() {
     }
   }, [address, signMessageAsync, refreshAuth, reloadTrips]);
 
-  // ─── 공통 파생 상태 ───────────────────────────────────────────────────
-  const trip: Trip | null = demoMode ? demoTrip : testnetTrip;
-  const setTrip = demoMode
-    ? setDemoTrip
-    : (t: Trip) => { setTestnetTrip(t); };
-
-  const agentMessages = demoMode ? demoAgentMessages : testnetAgentMessages;
-  const setAgentMessages = demoMode ? setDemoAgentMessages : setTestnetAgentMessages;
-
-  const connectedParticipant = isConnected && address && !demoMode && trip
+  // ─── 파생 상태 ─────────────────────────────────────────────────────────
+  const connectedParticipant = isConnected && address && trip
     ? trip.participants.find((p) => p.address.toLowerCase() === address.toLowerCase())
     : undefined;
 
-  const currentUserId: ParticipantId = demoMode
-    ? currentDemoUserId
-    : (connectedParticipant?.id ?? "A");
-
+  const currentUserId: ParticipantId = connectedParticipant?.id ?? "A";
   const currentParticipant = trip?.participants.find((p) => p.id === currentUserId) ?? null;
   const summary = trip ? calcParticipantSummary(trip, currentUserId) : null;
   const isWrongChain = isConnected && chainId !== arcTestnet.id;
-  const isTestnetParticipant = !demoMode && isConnected && !!connectedParticipant;
-  const isTestnetNonParticipant = !demoMode && isConnected && !connectedParticipant && !!trip;
-
-  function handleModeSwitch() {
-    const next: AppMode = appMode === "demo" ? "testnet" : "demo";
-    if (next === "testnet") {
-      setTestnetTrip(null);
-      setSelectedDbTripId(null);
-    }
-    setAppMode(next);
-  }
-
-  function handleDemoReset() {
-    setDemoTrip(DEMO_TRIP);
-    setDemoAgentMessages(DEMO_AGENT_MESSAGES);
-    setCurrentDemoUserId("A");
-  }
+  const isParticipant = isConnected && !!connectedParticipant;
+  const isNonParticipant = isConnected && !connectedParticipant && !!trip;
 
   // ─── RENDER ───────────────────────────────────────────────────────────
   return (
@@ -306,8 +256,7 @@ export default function App() {
                 </a>
               </p>
             </div>
-            {/* DEMO 모드에서는 실제 지갑 연결 버튼 숨김 */}
-            {!demoMode && <ConnectKitButton />}
+            <ConnectKitButton />
           </div>
 
           {/* 체인 경고 */}
@@ -317,8 +266,8 @@ export default function App() {
             </div>
           )}
 
-          {/* TESTNET 로그인 UI (최초 로그인 + 만료 재인증 공통) */}
-          {!demoMode && isConnected && !isWrongChain && !isAuthenticated && serverOnline && (
+          {/* 로그인 UI (최초 로그인 + 만료 재인증 공통) */}
+          {isConnected && !isWrongChain && !isAuthenticated && serverOnline && (
             <div className={`mb-2 border rounded-lg px-3 py-2 flex items-center justify-between ${
               isExpired
                 ? "bg-amber-50 border-amber-200"
@@ -344,26 +293,26 @@ export default function App() {
               </button>
             </div>
           )}
-          {authError && !demoMode && (
+          {(authError || tripsError) && (
             <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
-              {authError}
+              {authError || tripsError}
             </div>
           )}
 
-          {/* 참여자 인식 (TESTNET) */}
-          {isTestnetParticipant && (
+          {/* 참여자 인식 */}
+          {isParticipant && (
             <div className="mb-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 text-xs text-emerald-700">
               지갑 인식: <strong>{connectedParticipant?.name}</strong> ({address?.slice(0, 6)}…{address?.slice(-4)})
             </div>
           )}
-          {isTestnetNonParticipant && (
+          {isNonParticipant && (
             <div className="mb-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
               ⚠️ 연결된 지갑이 이 여행방 참여자가 아닙니다. 읽기 전용.
             </div>
           )}
 
-          {/* 여행방 전환 (TESTNET + 인증됨 + 여행방 2개 이상) */}
-          {!demoMode && isAuthenticated && serverTrips.length > 1 && (
+          {/* 여행방 전환 (인증됨 + 여행방 2개 이상) */}
+          {isAuthenticated && serverTrips.length > 1 && (
             <div className="mb-2 flex items-center gap-2 flex-wrap">
               <span className="text-xs text-stone-500">여행방:</span>
               {serverTrips.map((t) => (
@@ -382,52 +331,17 @@ export default function App() {
             </div>
           )}
 
-          {/* 모드 전환 + 시연 역할 전환 */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <button
-              onClick={handleModeSwitch}
-              className={`px-3 py-1 rounded-full text-xs font-semibold border transition-colors ${
-                demoMode
-                  ? "bg-amber-100 text-amber-800 border-amber-300"
-                  : "bg-emerald-100 text-emerald-800 border-emerald-300"
-              }`}
-            >
-              {demoMode ? "⚠️ 시연 모드" : "🔗 테스트넷 모드"}
-            </button>
-            {demoMode && trip && (
-              <>
-                <UserSwitcher
-                  participants={trip.participants}
-                  currentUserId={currentDemoUserId}
-                  onSwitch={setCurrentDemoUserId}
-                  isDemoMode
-                />
-                <button
-                  onClick={handleDemoReset}
-                  className="px-3 py-1 rounded-full text-xs border bg-stone-100 text-stone-500 border-stone-200 hover:bg-stone-200"
-                >
-                  시연 초기화
-                </button>
-              </>
-            )}
-            {!demoMode && (
-              <span className="text-xs text-stone-500">
-                실지갑 모드: 역할 전환 비활성화 · 지갑 주소로 자동 인식
-              </span>
-            )}
+          {/* Arc Testnet 표시 */}
+          <div className="flex items-center gap-2">
+            <span className="px-3 py-1 rounded-full text-xs font-semibold border bg-emerald-100 text-emerald-800 border-emerald-300">
+              🔗 Arc Testnet (5042002)
+            </span>
+            <span className="text-xs text-stone-500">
+              지갑 연결 후 서명으로 로그인
+            </span>
           </div>
         </div>
       </header>
-
-      {/* 시연 모드 배너 */}
-      {demoMode && (
-        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2">
-          <div className="max-w-4xl mx-auto text-xs text-amber-700">
-            <strong>⚠️ 시연 데이터 · 실제 지갑/온체인 상태 아님</strong> —
-            버튼 클릭은 React 상태만 변경합니다.
-          </div>
-        </div>
-      )}
 
       {/* 상단 요약 바 */}
       {currentParticipant && summary && (
@@ -464,8 +378,8 @@ export default function App() {
       {/* 탭 콘텐츠 */}
       <main className="max-w-4xl mx-auto px-4 py-4 pb-12">
 
-        {/* TESTNET — 서버 오프라인 */}
-        {!demoMode && !serverChecking && !serverOnline && (
+        {/* 서버 오프라인 */}
+        {!serverChecking && !serverOnline && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center mt-4">
             <p className="text-amber-700 font-medium mb-1">⚠ API 서버 오프라인</p>
             <p className="text-xs text-amber-600">
@@ -475,8 +389,8 @@ export default function App() {
           </div>
         )}
 
-        {/* TESTNET — 인증 만료 (토큰이 있었으나 서버가 401 반환) */}
-        {!demoMode && serverOnline && isExpired && !authLoading && (
+        {/* 인증 만료 (토큰이 있었으나 서버가 401 반환) */}
+        {serverOnline && isExpired && !authLoading && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center mt-4">
             <p className="text-2xl mb-2">⏱️</p>
             <h2 className="text-base font-semibold text-amber-800 mb-1">로그인이 만료되었습니다</h2>
@@ -496,8 +410,8 @@ export default function App() {
           </div>
         )}
 
-        {/* TESTNET — 서버 온라인, 미인증 (만료가 아닌 최초 미로그인) */}
-        {!demoMode && serverOnline && !isAuthenticated && !isExpired && !authLoading && (
+        {/* 서버 온라인, 미인증 (만료가 아닌 최초 미로그인) */}
+        {serverOnline && !isAuthenticated && !isExpired && !authLoading && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
             <p className="text-2xl mb-3">🔑</p>
             <h2 className="text-base font-semibold text-stone-700 mb-2">로그인이 필요합니다</h2>
@@ -509,22 +423,21 @@ export default function App() {
           </div>
         )}
 
-        {/* TESTNET — 인증됨, 여행방 로드 중 */}
-        {!demoMode && serverOnline && isAuthenticated && tripsLoading && (
+        {/* 인증됨, 여행방 로드 중 */}
+        {serverOnline && isAuthenticated && tripsLoading && (
           <div className="text-center py-12 text-stone-400 text-sm">여행방 목록 불러오는 중…</div>
         )}
 
-        {/* TESTNET — 인증됨, 여행방 일반 오류 (401 제외) */}
-        {!demoMode && serverOnline && isAuthenticated && !tripsLoading && tripsError && (
+        {/* 인증됨, 여행방 일반 오류 (401 제외) */}
+        {serverOnline && isAuthenticated && !tripsLoading && tripsError && (
           <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 mt-4 text-xs text-rose-700">
             여행방 목록 오류: {tripsError}
-            {/* 재시도는 만료 토큰 없이 유효한 토큰으로만 실행 */}
             <button onClick={() => { void reloadTrips(); }} className="ml-2 underline">재시도</button>
           </div>
         )}
 
-        {/* TESTNET — 인증됨, 200 응답 후 빈 배열 — 요청 성공했을 때만 표시 */}
-        {!demoMode && serverOnline && isAuthenticated && !tripsLoading && !tripsError
+        {/* 인증됨, API 200 + 빈 배열 — 요청 성공했을 때만 표시 */}
+        {serverOnline && isAuthenticated && !tripsLoading && !tripsError
           && tripsLoadedOnce && !trip && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
             <p className="text-2xl mb-3">🗺️</p>
@@ -532,9 +445,6 @@ export default function App() {
             <p className="text-sm text-stone-500 mb-1">
               Arc Testnet에서 <code className="font-mono bg-stone-100 px-1 rounded">createTrip</code>을 실행하고
               트랜잭션 해시로 여행방을 등록하세요.
-            </p>
-            <p className="text-xs text-stone-400 mt-3">
-              시연 데이터를 보려면 상단의 "⚠️ 시연 모드"로 전환하세요.
             </p>
           </div>
         )}
@@ -545,9 +455,8 @@ export default function App() {
             trip={trip}
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
-            demoMode={demoMode}
-            connectedAddress={demoMode ? undefined : address}
-            isWrongChain={!demoMode && isWrongChain}
+            connectedAddress={address}
+            isWrongChain={isWrongChain}
           />
         )}
         {trip && activeTab === "my" && (
@@ -565,9 +474,8 @@ export default function App() {
             trip={trip}
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
-            demoMode={demoMode}
-            connectedAddress={demoMode ? undefined : address}
-            isWrongChain={!demoMode && isWrongChain}
+            connectedAddress={address}
+            isWrongChain={isWrongChain}
           />
         )}
         {activeTab === "itinerary" && (
@@ -575,7 +483,6 @@ export default function App() {
             trip={trip}
             currentUserId={currentUserId}
             onTripUpdate={trip ? setTrip : () => undefined}
-            demoMode={demoMode}
             agentMessages={agentMessages}
             onAgentMessagesUpdate={setAgentMessages}
             dbTripId={selectedDbTripId}
@@ -591,14 +498,14 @@ export default function App() {
             MoaArcTreasury: <span className="font-mono">{MOAARK_ADDRESS}</span> ·
             Arc Testnet (MoaArcTreasury v2.0)
           </p>
-          {!demoMode && !serverChecking && (
+          {!serverChecking && (
             <p className={serverOnline ? "text-emerald-600 font-medium" : "text-amber-500 font-medium"}>
               {serverOnline
                 ? "✓ API 서버 연결됨 — 일정·지출·메모가 DB에 영속 저장됩니다."
                 : "⚠ API 서버 오프라인 — bun run server 로 시작하세요."}
             </p>
           )}
-          {!demoMode && serverOnline && (
+          {serverOnline && (
             <p className={geminiConfigured ? "text-emerald-600 font-medium" : "text-amber-500 font-medium"}>
               {geminiConfigured
                 ? "✓ Gemini 에이전트 활성 — 실시간 가격 조사 가능"

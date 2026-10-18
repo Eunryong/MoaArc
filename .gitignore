@@ -31,6 +31,9 @@ prisma/dev.db
 prisma/dev.db-journal
 *.db
 *.db-journal
+# 중첩 경로 SQLite (server/prisma/server/prisma/dev.db 등)
+**/prisma/**/*.db
+**/prisma/**/*.db-journal
 
 # ─── OS / 편집기 ──────────────────────────────────────────────────────────────
 .DS_Store

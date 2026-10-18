@@ -25,8 +25,9 @@ export async function requireAuth(c: Context, next: Next) {
   if (!authHeader.startsWith("Bearer ")) {
     return c.json({ error: "인증이 필요합니다." }, 401);
   }
+  const rawToken = authHeader.slice(7);
   try {
-    const address = await verifyToken(authHeader.slice(7));
+    const address = await verifyToken(rawToken);
     c.set("callerAddress", address);
     await next();
   } catch {

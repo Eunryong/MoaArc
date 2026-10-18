@@ -5,9 +5,6 @@
 
 export type ParticipantId = "A" | "B" | "C" | "D";
 
-/** 앱 실행 모드 */
-export type AppMode = "demo" | "testnet";
-
 /** 온체인 정산 상태 (MoaArkTreasury SettlementStatus enum과 일치) */
 export type SettlementStatus =
   | "None"

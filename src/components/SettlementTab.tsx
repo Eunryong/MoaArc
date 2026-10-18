@@ -8,18 +8,28 @@ import {
   parseUsdcInput,
   toDisplayNumber,
 } from "../calculations";
-import { createEmptySettlement } from "../demoData";
+function createEmptySettlement(): FinalSettlement {
+  return {
+    ledgerHash: "",
+    version: 0,
+    members: ["A", "B", "C", "D"],
+    finalRefundAmounts: { A: 0n, B: 0n, C: 0n, D: 0n },
+    requiredDeficits: { A: 0n, B: 0n, C: 0n, D: 0n },
+    approvals: [],
+    proposed: false,
+    status: "None",
+  };
+}
 
 interface Props {
   trip: Trip;
   currentUserId: ParticipantId;
   onTripUpdate: (t: Trip) => void;
-  demoMode?: boolean;
   connectedAddress?: `0x${string}`;
   isWrongChain?: boolean;
 }
 
-export default function SettlementTab({ trip, currentUserId, onTripUpdate, demoMode, isWrongChain }: Props) {
+export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWrongChain: _isWrongChain }: Props) {
   const isAdmin = trip.participants.find((p) => p.id === currentUserId)?.isAdmin ?? false;
   const pendingCount = getPendingExpenseCount(trip);
   const contractBalance = getContractBalance(trip);

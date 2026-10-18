@@ -38,18 +38,37 @@ MoaArc는 여행 일정을 관리하고, 참여자 간 공동경비를 Arc 블�
 
 ---
 
-## 미구현 / 외부 설정 필요
+## 구현 상태 및 제한
 
-| 항목 | 상태 | 필요 조건 |
-|------|------|-----------|
-| **백엔드 서버 / 영속 DB** | ❌ 미구현 | Node.js 서버 + PostgreSQL/SQLite 필요 |
-| **Gemini 에이전트 실검색** | ❌ 미구현 | 서버 `GEMINI_API_KEY` + `/api/agent` 엔드포인트 필요 |
-| **지갑 서명 인증 (nonce)** | ❌ 미구현 | 서버 API + DB 필요 |
-| **여행방 공유 (다중 사용자)** | ❌ React 로컬 상태만 | 서버 DB 필요 |
-| **푸시 알림** | ❌ 앱 내 표시만 | 백그라운드 서버 필요 |
+| 항목 | 상태 | 비고 |
+|------|------|------|
+| **백엔드 서버 / 영속 DB** | ✅ 구현됨 | Hono + Prisma + SQLite(개발), `bun run server` |
+| **지갑 서명 인증 (nonce/JWT)** | ✅ 구현됨 | `GET /api/auth/nonce` + `POST /api/auth/verify`, 24h JWT |
+| **여행방 DB 등록/목록** | ✅ 구현됨 | `POST /api/trips`, `GET /api/trips` (참여자별 필터) |
+| **일정 CRUD** | ✅ 구현됨 | `GET/POST /api/trips/:id/itinerary`, PATCH 지원 |
+| **지출 기록·승인 흐름** | ✅ 구현됨 | 버전 이력, 수정 요청, 전원 승인 |
+| **Gemini 에이전트 실검색** | ⚠️ 부분 | `GEMINI_API_KEY` 미설정 시 응답 없음, 설정 시 활성 |
+| **푸시 알림** | ❌ 앱 내 표시만 | 백그라운드 서버·웹소켓 필요 |
 | **정산 중 잔액 변경 잠금** | ⚠️ 부분 | `MoaArcTreasury` v2 배포 예정 |
-| **실제 tripId 동적 파싱** | ⚠️ 부분 구현 | `TripCreated` 이벤트 파싱 완성 필요 |
+| **실제 tripId 동적 파싱** | ⚠️ 부분 | `TripCreated` 이벤트 파싱 완성 필요 |
 | **Mainnet 배포** | 🚫 금지 | 독립 보안 감사 + 사용자 직접 배포 |
+
+### 백엔드 실행
+
+```bash
+# .env 또는 환경변수 설정 (env.example 참고)
+DATABASE_URL=file:./server/prisma/dev.db
+JWT_SECRET=<랜덤 32바이트 이상>
+MOARC_CONTRACT_ADDRESS=0x63aff048f159b1712e7c8d728cdc61b004eed40e
+ARC_TESTNET_RPC_FALLBACK=https://rpc.testnet.arc.io
+
+bun run server          # API 서버 (localhost:3001)
+bun run dev             # Vite 개발 서버 (localhost:5173, /api → 3001 프록시)
+```
+
+### Arc Studio 프리뷰 환경
+
+Arc Studio 프리뷰(`*.preview.studio.arc.io`)에서는 Vite proxy(`/api → localhost:3001`)가 브라우저와 서버를 연결합니다. 절대 주소(`http://localhost:3001`)는 브라우저에서 도달 불가이므로 항상 상대 경로(`/api/...`)를 사용합니다.
 
 ---
 

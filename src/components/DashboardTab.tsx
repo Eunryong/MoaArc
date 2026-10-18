@@ -20,20 +20,19 @@ import {
   txExplorerUrl,
 } from "../useContractWrite";
 
-// 시연용 TRIP_ID (온체인 tripId 1번 가정, 실제 연동 시 동적으로 결정)
+// 온체인 tripId는 trip 데이터에서 읽음
 const ONCHAIN_TRIP_ID = 1n;
 
 interface Props {
   trip: Trip;
   currentUserId: ParticipantId;
   onTripUpdate: (t: Trip) => void;
-  demoMode: boolean;
   connectedAddress?: `0x${string}`;
-  /** TESTNET: Arc Testnet이 아닌 체인에 연결됐을 때 true */
+  /** Arc Testnet이 아닌 체인에 연결됐을 때 true */
   isWrongChain?: boolean;
 }
 
-export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMode, connectedAddress: _connectedAddress, isWrongChain }: Props) {
+export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTripUpdate, connectedAddress: _connectedAddress, isWrongChain }: Props) {
   const [depositInput, setDepositInput] = useState("");
   const [depositMsg, setDepositMsg] = useState("");
   const [releaseInput, setReleaseInput] = useState("");
@@ -58,68 +57,7 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
   const releaseHook = useReleaseBudget(ONCHAIN_TRIP_ID);
   const returnHook = useReturnUnusedBudget(ONCHAIN_TRIP_ID);
 
-  // ─── 시연 모드 핸들러 ────────────────────────────────────────────────────
-
-  function handleDemoDeposit() {
-    const amt = parseUsdcInput(depositInput);
-    if (!amt || amt <= 0n) {
-      setDepositMsg("올바른 금액을 입력해주세요.");
-      return;
-    }
-    const updatedParticipants = trip.participants.map((p) =>
-      p.id === currentUserId
-        ? { ...p, depositedAmount: p.depositedAmount + amt }
-        : p
-    );
-    onTripUpdate({ ...trip, participants: updatedParticipants });
-    setDepositMsg(`[시연] ${fmtUsdc(amt)} USDC 입금 기록됨 (실제 거래 아님)`);
-    setDepositInput("");
-  }
-
-  function handleDemoRelease() {
-    const amt = parseUsdcInput(releaseInput);
-    if (!amt || amt <= 0n) {
-      setReleaseMsg("올바른 금액을 입력해주세요.");
-      return;
-    }
-    if (amt > contractBalance) {
-      setReleaseMsg(`공동지갑 잔액(${fmtUsdc(contractBalance)} USDC)이 부족합니다.`);
-      return;
-    }
-    const updatedParticipants = trip.participants.map((p) =>
-      p.id === releaseTarget
-        ? { ...p, allocatedBudget: p.allocatedBudget + amt }
-        : p
-    );
-    onTripUpdate({ ...trip, participants: updatedParticipants });
-    setReleaseMsg(
-      `[시연] ${trip.participants.find((p) => p.id === releaseTarget)?.name}에게 ${fmtUsdc(amt)} USDC 이체 기록됨 (실제 거래 아님)`
-    );
-    setReleaseInput("");
-    setReleaseMemo("");
-  }
-
-  function handleDemoReturn() {
-    const amt = parseUsdcInput(returnInput);
-    if (!amt || amt <= 0n) {
-      setReturnMsg("올바른 금액을 입력해주세요.");
-      return;
-    }
-    if (amt > (me?.allocatedBudget ?? 0n)) {
-      setReturnMsg(`반납 가능 금액(${fmtUsdc(me?.allocatedBudget ?? 0n)} USDC)을 초과합니다.`);
-      return;
-    }
-    const updatedParticipants = trip.participants.map((p) =>
-      p.id === currentUserId
-        ? { ...p, allocatedBudget: p.allocatedBudget - amt }
-        : p
-    );
-    onTripUpdate({ ...trip, participants: updatedParticipants });
-    setReturnMsg(`[시연] ${fmtUsdc(amt)} USDC 반납 기록됨 (실제 거래 아님)`);
-    setReturnInput("");
-  }
-
-  // ─── 실지갑 모드 핸들러 ─────────────────────────────────────────────────
+  // ─── 온체인 핸들러 ──────────────────────────────────────────────────────
 
   async function handleOnchainDeposit() {
     const amt = parseUsdcInput(depositInput);
@@ -163,9 +101,9 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
     }
   }
 
-  const handleDeposit = demoMode ? handleDemoDeposit : handleOnchainDeposit;
-  const handleRelease = demoMode ? handleDemoRelease : handleOnchainRelease;
-  const handleReturn = demoMode ? handleDemoReturn : handleOnchainReturn;
+  const handleDeposit = handleOnchainDeposit;
+  const handleRelease = handleOnchainRelease;
+  const handleReturn = handleOnchainReturn;
 
   return (
     <div className="space-y-4">
@@ -213,10 +151,9 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
       </div>
 
       {/* 입금 카드 */}
-      <div className={`bg-white rounded-xl border p-4 ${demoMode ? "border-amber-200" : "border-stone-200"}`}>
+      <div className="bg-white rounded-xl border border-stone-200 p-4">
         <div className="flex items-center gap-2 mb-1">
           <h3 className="text-sm font-semibold text-stone-700">공동지갑 입금</h3>
-          {demoMode && <DemoBadge />}
         </div>
         <p className="text-xs text-stone-400 mb-3">
           내 입금 완료액: <strong className="text-stone-700">{fmtUsdc(summary.depositedAmount)} USDC</strong>
@@ -238,33 +175,30 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
           />
           <button
             onClick={() => { void handleDeposit(); }}
-            disabled={(!demoMode && depositHook.state.status === "pending") || (!demoMode && !!isWrongChain)}
-            title={isWrongChain && !demoMode ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+            disabled={depositHook.state.status === "pending" || !!isWrongChain}
+            title={isWrongChain ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
             className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             입금
           </button>
         </div>
-        {demoMode && depositMsg && (
-          <p className="text-xs mt-1.5 text-amber-600 font-medium">{depositMsg}</p>
+        {depositMsg && (
+          <p className="text-xs mt-1.5 text-rose-600">{depositMsg}</p>
         )}
-        {!demoMode && depositHook.state.status !== "idle" && (
+        {depositHook.state.status !== "idle" && (
           <TxStatusRow state={depositHook.state} />
         )}
-        {!demoMode && (
-          <p className="text-xs text-stone-400 mt-1">
-            USDC approve → deposit 순서로 두 번의 지갑 승인이 필요합니다.
-          </p>
-        )}
+        <p className="text-xs text-stone-400 mt-1">
+          USDC approve → deposit 순서로 두 번의 지갑 승인이 필요합니다.
+        </p>
       </div>
 
       {/* 예산 이체 카드 (관리자 전용) */}
       {isAdmin && (
-        <div className={`bg-white rounded-xl border p-4 ${demoMode ? "border-amber-200" : "border-stone-200"}`}>
+        <div className="bg-white rounded-xl border border-stone-200 p-4">
           <div className="flex items-center gap-2 mb-1">
             <h3 className="text-sm font-semibold text-stone-700">결제용 예산 이체</h3>
             <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">관리자 전용</span>
-            {demoMode && <DemoBadge />}
           </div>
           <p className="text-xs text-stone-400 mb-3">
             공동자금을 결제자의 외부 지갑으로 이체합니다.
@@ -304,25 +238,24 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
               />
               <button
                 onClick={() => { void handleRelease(); }}
-                disabled={(!demoMode && releaseHook.state.status === "pending") || (!demoMode && !!isWrongChain)}
-                title={isWrongChain && !demoMode ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+                disabled={releaseHook.state.status === "pending" || !!isWrongChain}
+                title={isWrongChain ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
                 className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 이체
               </button>
             </div>
           </div>
-          {demoMode && releaseMsg && <p className="text-xs mt-1.5 text-amber-600 font-medium">{releaseMsg}</p>}
-          {!demoMode && releaseHook.state.status !== "idle" && <TxStatusRow state={releaseHook.state} />}
+          {releaseMsg && <p className="text-xs mt-1.5 text-rose-600">{releaseMsg}</p>}
+          {releaseHook.state.status !== "idle" && <TxStatusRow state={releaseHook.state} />}
         </div>
       )}
 
       {/* 미반납 예산 반납 카드 */}
       {(me?.allocatedBudget ?? 0n) > 0n && (
-        <div className={`rounded-xl border p-4 ${demoMode ? "bg-amber-50 border-amber-200" : "bg-amber-50 border-amber-200"}`}>
+        <div className="rounded-xl border p-4 bg-amber-50 border-amber-200">
           <div className="flex items-center gap-2 mb-1">
             <h3 className="text-sm font-semibold text-amber-800">미반납 결제예산 반납</h3>
-            {demoMode && <DemoBadge />}
           </div>
           <p className="text-xs text-amber-600 mb-3">
             내 외부 결제지갑에 공동자금 <strong>{fmtUsdc(me.allocatedBudget)} USDC</strong>가 있습니다.
@@ -340,20 +273,18 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate, demoMo
             />
             <button
               onClick={() => { void handleReturn(); }}
-              disabled={(!demoMode && returnHook.state.status === "pending") || (!demoMode && !!isWrongChain)}
-              title={isWrongChain && !demoMode ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+              disabled={returnHook.state.status === "pending" || !!isWrongChain}
+              title={isWrongChain ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
               className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               반납
             </button>
           </div>
-          {demoMode && returnMsg && <p className="text-xs mt-1.5 text-amber-600 font-medium">{returnMsg}</p>}
-          {!demoMode && returnHook.state.status !== "idle" && <TxStatusRow state={returnHook.state} />}
-          {!demoMode && (
-            <p className="text-xs text-amber-600 mt-1">
-              USDC approve → returnUnusedBudget 순서로 두 번의 지갑 승인이 필요합니다.
-            </p>
-          )}
+          {returnMsg && <p className="text-xs mt-1.5 text-rose-600">{returnMsg}</p>}
+          {returnHook.state.status !== "idle" && <TxStatusRow state={returnHook.state} />}
+          <p className="text-xs text-amber-600 mt-1">
+            USDC approve → returnUnusedBudget 순서로 두 번의 지갑 승인이 필요합니다.
+          </p>
         </div>
       )}
     </div>
@@ -386,14 +317,6 @@ function Row({
       </p>
       {note && <p className="text-xs text-stone-400 mt-0.5">{note}</p>}
     </div>
-  );
-}
-
-function DemoBadge() {
-  return (
-    <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full border border-amber-200 font-medium">
-      시연용 · 실제 거래 아님
-    </span>
   );
 }
 
