@@ -21,11 +21,25 @@ declare module "hono" {
 // ─── Bearer 토큰 검증 ────────────────────────────────────────────────────────
 
 export async function requireAuth(c: Context, next: Next) {
+  // 토큰 추출 우선순위:
+  // 1) Authorization: Bearer <token>  — 표준 헤더 (Arc Studio 게이트웨이가 제거함, 확인됨)
+  // 2) X-Auth-Token: <token>          — 커스텀 헤더 (게이트웨이가 제거함, 확인됨)
+  // 3) Cookie: moaarc_token=<token>   — 쿠키 (게이트웨이가 쿠키를 드롭하지 않는다고 확인됨)
+  // traces 2026-10-18 실측: Authorization과 X-Auth-Token 모두 게이트웨이에서 제거됨.
   const authHeader = c.req.header("Authorization") ?? "";
-  if (!authHeader.startsWith("Bearer ")) {
+  const xAuthToken = c.req.header("X-Auth-Token") ?? "";
+  const cookieHeader = c.req.header("Cookie") ?? "";
+  const cookieToken = cookieHeader
+    .split(";")
+    .map((s) => s.trim())
+    .find((s) => s.startsWith("moaarc_token="))
+    ?.slice("moaarc_token=".length) ?? "";
+  const rawToken = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7)
+    : xAuthToken || cookieToken || null;
+  if (!rawToken) {
     return c.json({ error: "인증이 필요합니다." }, 401);
   }
-  const rawToken = authHeader.slice(7);
   try {
     const address = await verifyToken(rawToken);
     c.set("callerAddress", address);

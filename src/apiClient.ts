@@ -21,8 +21,16 @@ const TOKEN_KEY = "moaarc_auth_token";
 
 // ─── 토큰 관리 ────────────────────────────────────────────────────────────────
 
+// Arc Studio 프리뷰 게이트웨이가 Authorization과 X-Auth-Token 헤더를 모두 제거함
+// (traces 2026-10-18 실측 확인). 쿠키는 게이트웨이를 통과하므로 쿠키로도 토큰을 저장한다.
+// SameSite=Strict: CSRF 공격 방지 (same-site 요청에만 쿠키 전송)
+// path=/api: API 경로에만 쿠키 전송 — UI 경로는 쿠키 불필요
+const COOKIE_NAME = "moaarc_token";
+
 export function saveToken(token: string) {
   sessionStorage.setItem(TOKEN_KEY, token);
+  // 쿠키에도 저장 — 게이트웨이 우회를 위해. max-age=86400(24h, JWT TTL과 동일)
+  document.cookie = `${COOKIE_NAME}=${encodeURIComponent(token)}; path=/api; max-age=86400; SameSite=Strict`;
 }
 
 export function getToken(): string | null {
@@ -31,6 +39,8 @@ export function getToken(): string | null {
 
 export function clearToken() {
   sessionStorage.removeItem(TOKEN_KEY);
+  // 쿠키도 삭제 — max-age=0으로 즉시 만료
+  document.cookie = `${COOKIE_NAME}=; path=/api; max-age=0; SameSite=Strict`;
 }
 
 // ─── 기본 fetch 래퍼 ────────────────────────────────────────────────────────
@@ -38,13 +48,20 @@ export function clearToken() {
 async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: string): Promise<T> {
   // explicitToken이 있으면 우선 사용 — 로그인 직후 React state 반영 전 stale closure 방지
   const token = explicitToken ?? getToken();
+  // Authorization: Bearer 헤더를 설정하지만 Arc Studio 게이트웨이가 제거함 (확인됨).
+  // 쿠키(moaarc_token)가 실제 인증 전달 경로: saveToken()에서 document.cookie에도 저장하고
+  // credentials: 'include'로 fetch하면 브라우저가 same-origin 쿠키를 자동 포함.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...((init?.headers as Record<string, string>) ?? {}),
   };
 
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers,
+    credentials: "include", // 쿠키 자동 포함 — 게이트웨이 우회 핵심
+  });
 
   // ── Content-Type 먼저 확인: HTML(502/504 등)을 JSON으로 파싱하지 않도록 방지 ──
   // 401이라도 서버가 JSON을 반환할 수 있으므로 Content-Type 체크를 우선합니다.
@@ -66,11 +83,18 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   const body = await res.json() as Record<string, unknown>;
 
   if (res.status === 401) {
-    // JSON 401: 서버 응답 메시지로 원인 구분
+    // JSON 401: 서버 응답 메시지로 원인을 구분해서 처리합니다.
     const serverMsg = (body.error as string) ?? "";
-    // "인증이 필요합니다." = Authorization 헤더 없음 (토큰 미전달)
-    // "유효하지 않거나 만료된 토큰입니다." = 토큰 서명/만료 검증 실패
-    clearToken();
+    // "인증이 필요합니다." = Authorization 헤더 자체가 없었음
+    //   → 클라이언트가 헤더를 안 보냈거나 게이트웨이가 드롭한 것.
+    //   → 현재 토큰을 삭제하지 않음 — 토큰은 유효할 수 있으므로 재시도 가능.
+    // "유효하지 않거나 만료된 토큰" = 헤더는 있었지만 서버 검증 실패
+    //   → clearToken: 이 토큰은 더 이상 사용할 수 없음.
+    const isMissingHeader = serverMsg.includes("인증이 필요합니다");
+    if (!isMissingHeader) {
+      // 토큰 불량/만료 — 삭제
+      clearToken();
+    }
     throw new ApiError(401, serverMsg || "인증이 필요합니다. 다시 로그인해주세요.");
   }
 

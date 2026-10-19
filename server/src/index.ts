@@ -61,7 +61,7 @@ app.use(
       return allowedOrigins[0]; // 그 외: 첫 번째 허용 origin으로 응답 (브라우저가 차단)
     },
     allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "X-Auth-Token"],
     credentials: true,
   })
 );

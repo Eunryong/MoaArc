@@ -6,7 +6,7 @@
  * 서버가 없으면 null을 반환하고 오류를 노출합니다.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   getHealth,
   listMyTrips,
@@ -34,7 +34,6 @@ export function useServerHealth() {
     void getHealth().then((h) => {
       if (mounted) { setHealth(h); setChecking(false); }
     });
-
     return () => { mounted = false; };
   }, []);
 
@@ -77,8 +76,17 @@ export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
   // 요청이 실제 성공(200)했는지 — true여야만 빈 배열을 "없음"으로 표시
   const [loadedOnce, setLoadedOnce] = useState(false);
 
+  // skipNextAutoLoad: reloadTrips(explicitToken)이 이미 진행 중일 때
+  // useEffect 자동 실행이 중복 요청을 만들지 않도록 1회 skip하는 플래그
+  const skipNextAutoRef = useRef(false);
+
   // explicitToken: 로그인 직후 React state 반영 전에 발급된 토큰을 직접 전달
   const load = useCallback(async (explicitToken?: string) => {
+    // 자동 실행(explicitToken 없음)이고 skip 플래그가 설정된 경우: 1회 skip
+    if (!explicitToken && skipNextAutoRef.current) {
+      skipNextAutoRef.current = false;
+      return;
+    }
     if (!explicitToken && !getToken()) return;
     setLoading(true);
     setError(null);
@@ -92,19 +100,20 @@ export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
       if (e instanceof ApiError && e.status === 401) {
         // 서버 메시지로 구분:
         // "인증이 필요합니다." = Authorization 헤더 자체가 없었음 (토큰 미전달)
-        //   → 에러 메시지 표시, clearToken/만료 상태로 전환 안 함
-        // "유효하지 않거나 만료된 토큰" = 토큰이 있었으나 서버 검증 실패 → markExpired
+        //   → apiFetch에서 이미 clearToken을 안 했으므로 토큰 보존
+        //   → 에러 메시지 표시, 만료 상태 전환 안 함
+        // "유효하지 않거나 만료된 토큰" = 헤더는 있었지만 검증 실패
+        //   → apiFetch에서 이미 clearToken 완료 → markExpired로 재인증 요청
         // "서버 게이트웨이 오류" (비-JSON 502 등) → 네트워크 문제 → 에러 표시만
         const isGatewayErr = e.message.includes("게이트웨이");
         const isMissingHeader = e.message.includes("인증이 필요합니다");
         if (isGatewayErr || isMissingHeader) {
-          // 헤더 누락 또는 게이트웨이 에러: 토큰 삭제·만료 상태 전환 안 함
           setError(isMissingHeader
             ? "인증 헤더가 전달되지 않았습니다. 로그인을 다시 시도해주세요."
             : `네트워크 오류: ${e.message}`
           );
         } else {
-          // 토큰 자체가 유효하지 않거나 만료 → 재인증 필요
+          // 토큰 불량/만료 → 재인증 필요 (apiFetch에서 이미 clearToken 완료)
           onAuthExpired?.();
         }
       } else {
@@ -116,14 +125,20 @@ export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
   }, [onAuthExpired]);
 
   // 자동 실행: enabled가 true로 바뀔 때(isAuthenticated 반영 후)
-  // load는 이미 explicitToken 없이 getToken()을 사용하므로
-  // handleWalletLogin의 reloadTrips(newToken)과 경쟁하지 않음 —
-  // load()가 explicitToken 없이 실행되면 getToken()을 읽는데, saveToken() 이후이므로 있음.
-  // 단, onAuthExpired가 load() 내에서 호출되면 clearToken()이 실행되므로
-  // 그 후 reloadTrips(newToken)은 explicitToken을 직접 전달해서 동작함.
+  // reloadTrips(explicitToken)이 이미 진행 중이면 skipNextAutoRef로 1회 skip
   useEffect(() => { if (enabled) void load(); }, [enabled, load]);
+
   // reload(token?): 인수 없으면 sessionStorage 토큰 사용, 있으면 직접 전달
-  return { trips, loading, error, loadedOnce, reload: load };
+  // explicitToken이 있으면 자동 effect가 같은 직후 중복 실행을 skip하도록 플래그 설정
+  const reload = useCallback((explicitToken?: string) => {
+    if (explicitToken) {
+      // 다음 자동 effect 1회 skip — React가 enabled 변화로 load()를 재실행하는 것을 막음
+      skipNextAutoRef.current = true;
+    }
+    return load(explicitToken);
+  }, [load]);
+
+  return { trips, loading, error, loadedOnce, reload };
 }
 
 // ─── 여행방 일정 ─────────────────────────────────────────────────────────────

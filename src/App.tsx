@@ -193,6 +193,27 @@ export default function App() {
     }
   }, [address, refreshAuth]);
 
+  // ─── 체인 전환 감지: 다른 체인 → Arc Testnet(5042002) ─────────────────
+  // 사용자가 지갑에서 수동으로 Arc Testnet으로 전환하면:
+  // 1) stale 오류 메시지를 즉시 제거
+  // 2) 세션 토큰이 있으면 여행방 목록을 재요청
+  // 자동 체인 전환·서명·거래는 절대 하지 않음.
+  const prevChainIdRef = useRef<number>(chainId);
+  useEffect(() => {
+    const prev = prevChainIdRef.current;
+    prevChainIdRef.current = chainId;
+
+    const arcTestnetId = 5042002;
+    if (prev !== chainId && chainId === arcTestnetId && prev !== arcTestnetId) {
+      // Arc Testnet으로 전환됨 — stale 오류 제거
+      setAuthError(null);
+      // 세션 토큰이 있으면 trips 재요청 (토큰 없으면 로그인 CTA 표시)
+      if (isAuthenticated) {
+        void reloadTrips();
+      }
+    }
+  }, [chainId, isAuthenticated, reloadTrips]);
+
   // ─── 지갑 서명 로그인 ─────────────────────────────────────────────────
   const handleWalletLogin = useCallback(async () => {
     if (!address) return;
