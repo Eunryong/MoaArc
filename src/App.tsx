@@ -91,6 +91,7 @@ export default function App() {
     error: tripsError,
     loadedOnce: tripsLoadedOnce,
     reload: reloadTrips,
+    clearError: clearTripsError,
   } = useMyTrips(serverOnline && isAuthenticated, markExpired);
 
   // ─── 선택된 여행방 일정·지출 ───────────────────────────────────────────
@@ -205,14 +206,15 @@ export default function App() {
 
     const arcTestnetId = 5042002;
     if (prev !== chainId && chainId === arcTestnetId && prev !== arcTestnetId) {
-      // Arc Testnet으로 전환됨 — stale 오류 제거
+      // Arc Testnet으로 전환됨 — stale 오류 모두 제거
       setAuthError(null);
+      clearTripsError();
       // 세션 토큰이 있으면 trips 재요청 (토큰 없으면 로그인 CTA 표시)
       if (isAuthenticated) {
         void reloadTrips();
       }
     }
-  }, [chainId, isAuthenticated, reloadTrips]);
+  }, [chainId, isAuthenticated, reloadTrips, clearTripsError]);
 
   // ─── 지갑 서명 로그인 ─────────────────────────────────────────────────
   const handleWalletLogin = useCallback(async () => {
@@ -315,8 +317,8 @@ export default function App() {
             </div>
           )}
 
-          {/* 오류 메시지 — 잘못된 체인에서는 숨김 (체인 경고가 대신 표시됨) */}
-          {!isWrongChain && (authError || tripsError) && (
+          {/* 오류 메시지 — 잘못된 체인에서는 숨김, tripsError는 인증됐을 때만 표시 */}
+          {!isWrongChain && (authError || (isAuthenticated && tripsError)) && (
             <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
               {authError || tripsError}
             </div>
@@ -476,8 +478,8 @@ export default function App() {
           <div className="text-center py-12 text-stone-400 text-sm">여행방 목록 불러오는 중…</div>
         )}
 
-        {/* 인증됨, 여행방 일반 오류 (401 제외) */}
-        {serverOnline && isAuthenticated && !tripsLoading && tripsError && (
+        {/* 인증됨, 여행방 일반 오류 (401 제외) — 체인이 틀리면 숨김 (체인 안내가 우선) */}
+        {serverOnline && isAuthenticated && !isWrongChain && !tripsLoading && tripsError && (
           <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 mt-4 text-xs text-rose-700">
             여행방 목록 오류: {tripsError}
             <button onClick={() => { void reloadTrips(); }} className="ml-2 underline">재시도</button>

@@ -138,7 +138,15 @@ export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
     return load(explicitToken);
   }, [load]);
 
-  return { trips, loading, error, loadedOnce, reload };
+  // clearError: 체인 전환·로그아웃 등으로 stale 오류를 외부에서 초기화
+  const clearError = useCallback(() => setError(null), []);
+
+  // enabled가 false로 바뀌면(로그아웃·만료) stale error를 초기화
+  useEffect(() => {
+    if (!enabled) setError(null);
+  }, [enabled]);
+
+  return { trips, loading, error, loadedOnce, reload, clearError };
 }
 
 // ─── 여행방 일정 ─────────────────────────────────────────────────────────────

@@ -74,8 +74,8 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
       throw new ApiError(401, `게이트웨이 오류 (HTTP 401)`);
     }
     if (res.status === 403) {
-      // 403 Forbidden — Arc Studio 게이트웨이가 credentials:include 요청을 차단.
-      // 이 오류는 인증 토큰 문제가 아니므로 clearToken() 호출 안 함.
+      // 403 Forbidden — Arc Studio 게이트웨이가 반환. 인증 토큰 문제가 아님.
+      // 토큰 삭제 없이 에러만 전파합니다.
       throw new ApiError(403, `네트워크 오류 (HTTP 403): 페이지를 새로고침하세요.`);
     }
     throw new ApiError(
