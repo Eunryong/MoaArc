@@ -22,15 +22,16 @@ const TOKEN_KEY = "moaarc_auth_token";
 // ─── 토큰 관리 ────────────────────────────────────────────────────────────────
 
 // Arc Studio 프리뷰 게이트웨이가 Authorization과 X-Auth-Token 헤더를 모두 제거함
-// (traces 2026-10-18 실측 확인). 쿠키는 게이트웨이를 통과하므로 쿠키로도 토큰을 저장한다.
-// SameSite=Strict: CSRF 공격 방지 (same-site 요청에만 쿠키 전송)
+// (traces 2026-10-18 실측 확인). 쿠키는 same-origin 요청에서 게이트웨이가 제거하지 않음.
 // path=/api: API 경로에만 쿠키 전송 — UI 경로는 쿠키 불필요
 const COOKIE_NAME = "moaarc_token";
 
 export function saveToken(token: string) {
   sessionStorage.setItem(TOKEN_KEY, token);
   // 쿠키에도 저장 — 게이트웨이 우회를 위해. max-age=86400(24h, JWT TTL과 동일)
-  document.cookie = `${COOKIE_NAME}=${encodeURIComponent(token)}; path=/api; max-age=86400; SameSite=Strict`;
+  // SameSite=Lax: same-site GET 요청에도 쿠키 전달 (Strict는 일부 탐색에서 차단)
+  // Secure 없음: Arc Studio 프리뷰는 HTTPS지만 개발 환경에서 유연성 확보
+  document.cookie = `${COOKIE_NAME}=${encodeURIComponent(token)}; path=/api; max-age=86400; SameSite=Lax`;
 }
 
 export function getToken(): string | null {
@@ -40,7 +41,7 @@ export function getToken(): string | null {
 export function clearToken() {
   sessionStorage.removeItem(TOKEN_KEY);
   // 쿠키도 삭제 — max-age=0으로 즉시 만료
-  document.cookie = `${COOKIE_NAME}=; path=/api; max-age=0; SameSite=Strict`;
+  document.cookie = `${COOKIE_NAME}=; path=/api; max-age=0; SameSite=Lax`;
 }
 
 // ─── 기본 fetch 래퍼 ────────────────────────────────────────────────────────
@@ -49,18 +50,18 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   // explicitToken이 있으면 우선 사용 — 로그인 직후 React state 반영 전 stale closure 방지
   const token = explicitToken ?? getToken();
   // Authorization: Bearer 헤더를 설정하지만 Arc Studio 게이트웨이가 제거함 (확인됨).
-  // 쿠키(moaarc_token)가 실제 인증 전달 경로: saveToken()에서 document.cookie에도 저장하고
-  // credentials: 'include'로 fetch하면 브라우저가 same-origin 쿠키를 자동 포함.
+  // 쿠키(moaarc_token)가 실제 인증 전달 경로: saveToken()에서 document.cookie에도 저장.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...((init?.headers as Record<string, string>) ?? {}),
   };
 
+  // credentials 기본값(same-origin) 사용 — 같은 origin 요청에 쿠키 자동 포함.
+  // "include"는 Arc Studio 게이트웨이가 403으로 차단하므로 사용하지 않음.
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers,
-    credentials: "include", // 쿠키 자동 포함 — 게이트웨이 우회 핵심
   });
 
   // ── Content-Type 먼저 확인: HTML(502/504 등)을 JSON으로 파싱하지 않도록 방지 ──
@@ -69,14 +70,19 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   if (!contentType.includes("application/json")) {
     const text = await res.text();
     if (res.status === 401) {
-      // JSON이 아닌 401(프록시/게이트웨이 에러) — 토큰 미삭제, 사용자가 재시도 가능
-      throw new ApiError(401, `서버 게이트웨이 오류 (HTTP 401, 비-JSON 응답)`);
+      // JSON이 아닌 401 — 게이트웨이/프록시 오류. 토큰 미삭제, 재시도 가능.
+      throw new ApiError(401, `게이트웨이 오류 (HTTP 401)`);
+    }
+    if (res.status === 403) {
+      // 403 Forbidden — Arc Studio 게이트웨이가 credentials:include 요청을 차단.
+      // 이 오류는 인증 토큰 문제가 아니므로 clearToken() 호출 안 함.
+      throw new ApiError(403, `네트워크 오류 (HTTP 403): 페이지를 새로고침하세요.`);
     }
     throw new ApiError(
       res.status,
       res.ok
         ? `예상치 못한 응답 형식 (${contentType || "unknown"})`
-        : `서버 오류 ${res.status}: ${text.slice(0, 120)}`
+        : `네트워크 오류 ${res.status}`
     );
   }
 

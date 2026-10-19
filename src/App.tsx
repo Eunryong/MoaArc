@@ -280,14 +280,14 @@ export default function App() {
             <ConnectKitButton />
           </div>
 
-          {/* 체인 경고 */}
+          {/* 체인 경고 — 잘못된 체인이면 이 배너만 표시하고 인증 UI는 숨김 */}
           {isWrongChain && (
             <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
               ⚠️ Arc Testnet (Chain ID: 5042002)으로 전환해주세요. 현재: {chainId}
             </div>
           )}
 
-          {/* 로그인 UI (최초 로그인 + 만료 재인증 공통) */}
+          {/* 로그인 UI — 올바른 체인이고 미인증일 때만 표시 */}
           {isConnected && !isWrongChain && !isAuthenticated && serverOnline && (
             <div className={`mb-2 border rounded-lg px-3 py-2 flex items-center justify-between ${
               isExpired
@@ -314,7 +314,9 @@ export default function App() {
               </button>
             </div>
           )}
-          {(authError || tripsError) && (
+
+          {/* 오류 메시지 — 잘못된 체인에서는 숨김 (체인 경고가 대신 표시됨) */}
+          {!isWrongChain && (authError || tripsError) && (
             <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
               {authError || tripsError}
             </div>
@@ -410,37 +412,62 @@ export default function App() {
           </div>
         )}
 
-        {/* 인증 만료 (토큰이 있었으나 서버가 401 반환) */}
-        {serverOnline && isExpired && !authLoading && (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center mt-4">
-            <p className="text-2xl mb-2">⏱️</p>
-            <h2 className="text-base font-semibold text-amber-800 mb-1">로그인이 만료되었습니다</h2>
-            <p className="text-sm text-amber-700 mb-4">
-              지갑 연결은 유지됩니다. 다시 서명하면 여행방 목록을 불러옵니다.
+        {/* ── 체인이 틀림: 체인 전환 안내만 ── */}
+        {isConnected && isWrongChain && (
+          <div className="bg-rose-50 border border-rose-200 rounded-xl p-8 text-center mt-4">
+            <p className="text-3xl mb-3">🔗</p>
+            <h2 className="text-base font-semibold text-rose-700 mb-2">
+              Arc Testnet으로 전환하세요
+            </h2>
+            <p className="text-sm text-rose-600 mb-1">
+              현재 체인: <strong>{chainId}</strong> · 필요한 체인: <strong>5042002</strong>
             </p>
-            <button
-              onClick={() => { void handleWalletLogin(); }}
-              disabled={authLoading || !isConnected}
-              className="px-4 py-2 rounded-full text-sm font-semibold bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
-            >
-              지갑으로 다시 인증
-            </button>
-            {!isConnected && (
-              <p className="text-xs text-amber-600 mt-2">지갑을 먼저 연결해주세요.</p>
-            )}
+            <p className="text-xs text-rose-500">
+              지갑에서 직접 네트워크를 Arc Testnet으로 변경해주세요.
+            </p>
           </div>
         )}
 
-        {/* 서버 온라인, 미인증 (만료가 아닌 최초 미로그인) */}
-        {serverOnline && !isAuthenticated && !isExpired && !authLoading && (
+        {/* ── 지갑 미연결: 연결 CTA ── */}
+        {!isConnected && serverOnline && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
-            <p className="text-2xl mb-3">🔑</p>
-            <h2 className="text-base font-semibold text-stone-700 mb-2">로그인이 필요합니다</h2>
+            <p className="text-3xl mb-3">👛</p>
+            <h2 className="text-base font-semibold text-stone-700 mb-2">지갑을 연결하세요</h2>
             <p className="text-sm text-stone-500 mb-4">
-              {!isConnected
-                ? "지갑을 연결한 뒤 서명으로 로그인하세요."
-                : "상단의 '지갑 서명으로 로그인' 버튼을 눌러주세요."}
+              상단의 지갑 연결 버튼을 눌러 Arc Testnet 지갑을 연결하세요.
             </p>
+          </div>
+        )}
+
+        {/* ── 지갑 연결됨 + 올바른 체인 + 미인증: 로그인 CTA ── */}
+        {isConnected && !isWrongChain && serverOnline && !isAuthenticated && !authLoading && (
+          <div className={`rounded-xl border p-8 text-center mt-4 ${
+            isExpired
+              ? "bg-amber-50 border-amber-200"
+              : "bg-white border-stone-200"
+          }`}>
+            <p className="text-3xl mb-3">{isExpired ? "⏱️" : "🔑"}</p>
+            <h2 className={`text-base font-semibold mb-2 ${
+              isExpired ? "text-amber-800" : "text-stone-700"
+            }`}>
+              {isExpired ? "로그인이 만료되었습니다" : "로그인이 필요합니다"}
+            </h2>
+            <p className={`text-sm mb-4 ${isExpired ? "text-amber-700" : "text-stone-500"}`}>
+              {isExpired
+                ? "지갑 연결은 유지됩니다. 다시 서명하면 여행방 목록을 불러옵니다."
+                : "지갑 서명으로 로그인하면 여행방 목록을 불러옵니다."}
+            </p>
+            <button
+              onClick={() => { void handleWalletLogin(); }}
+              disabled={authLoading}
+              className={`px-4 py-2 rounded-full text-sm font-semibold text-white disabled:opacity-50 ${
+                isExpired
+                  ? "bg-amber-600 hover:bg-amber-700"
+                  : "bg-indigo-600 hover:bg-indigo-700"
+              }`}
+            >
+              {isExpired ? "지갑으로 다시 인증" : "지갑 서명으로 로그인"}
+            </button>
           </div>
         )}
 
@@ -457,16 +484,21 @@ export default function App() {
           </div>
         )}
 
-        {/* 인증됨, API 200 + 빈 배열 — 요청 성공했을 때만 표시 */}
+        {/* ── 인증됨 + API 200 + 빈 배열: 여행방 없음 + 생성 안내 ── */}
         {serverOnline && isAuthenticated && !tripsLoading && !tripsError
           && tripsLoadedOnce && !trip && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
-            <p className="text-2xl mb-3">🗺️</p>
+            <p className="text-3xl mb-3">🗺️</p>
             <h2 className="text-base font-semibold text-stone-700 mb-2">참여한 여행방이 없습니다</h2>
-            <p className="text-sm text-stone-500 mb-1">
-              Arc Testnet에서 <code className="font-mono bg-stone-100 px-1 rounded">createTrip</code>을 실행하고
-              트랜잭션 해시로 여행방을 등록하세요.
+            <p className="text-sm text-stone-500 mb-3">
+              Arc Testnet에서 스마트 컨트랙트로 여행방을 생성한 뒤 등록할 수 있습니다.
             </p>
+            <div className="text-xs text-stone-400 bg-stone-50 rounded-lg p-3 text-left space-y-1 max-w-sm mx-auto">
+              <p className="font-semibold text-stone-500">여행방 생성 방법</p>
+              <p>1. Arc Testnet에 연결된 지갑에서</p>
+              <p>2. <code className="font-mono bg-stone-100 px-1 rounded">createTrip</code> 트랜잭션을 실행하고</p>
+              <p>3. 트랜잭션 해시로 서버에 등록하세요</p>
+            </div>
           </div>
         )}
 
