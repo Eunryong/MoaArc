@@ -43,7 +43,7 @@ export function useDeposit(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: approveTx });
-        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 120_000, confirmations: 1 });
 
         // Step 2: deposit
         const depositTx = await writeContractAsync({
@@ -54,7 +54,7 @@ export function useDeposit(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: depositTx });
-        await publicClient.waitForTransactionReceipt({ hash: depositTx });
+        await publicClient.waitForTransactionReceipt({ hash: depositTx, timeout: 120_000, confirmations: 1 });
         setState({ status: "success", txHash: depositTx });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -86,7 +86,7 @@ export function useReleaseBudget(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: tx });
-        await publicClient?.waitForTransactionReceipt({ hash: tx });
+        await publicClient?.waitForTransactionReceipt({ hash: tx, timeout: 120_000, confirmations: 1 });
         setState({ status: "success", txHash: tx });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -121,7 +121,7 @@ export function useReturnUnusedBudget(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: approveTx });
-        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 120_000, confirmations: 1 });
 
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
@@ -131,7 +131,7 @@ export function useReturnUnusedBudget(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: tx });
-        await publicClient.waitForTransactionReceipt({ hash: tx });
+        await publicClient.waitForTransactionReceipt({ hash: tx, timeout: 120_000, confirmations: 1 });
         setState({ status: "success", txHash: tx });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -165,7 +165,7 @@ export function usePayDeficit(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: approveTx });
-        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx, timeout: 120_000, confirmations: 1 });
 
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
@@ -175,7 +175,7 @@ export function usePayDeficit(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: tx });
-        await publicClient.waitForTransactionReceipt({ hash: tx });
+        await publicClient.waitForTransactionReceipt({ hash: tx, timeout: 120_000, confirmations: 1 });
         setState({ status: "success", txHash: tx });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -207,7 +207,7 @@ export function useApproveFinalSettlement(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: tx });
-        await publicClient?.waitForTransactionReceipt({ hash: tx });
+        await publicClient?.waitForTransactionReceipt({ hash: tx, timeout: 120_000, confirmations: 1 });
         setState({ status: "success", txHash: tx });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -238,7 +238,7 @@ export function useClaimRefund(tripId: bigint) {
         chainId: arcTestnet.id,
       });
       setState({ status: "pending", txHash: tx });
-      await publicClient?.waitForTransactionReceipt({ hash: tx });
+      await publicClient?.waitForTransactionReceipt({ hash: tx, timeout: 120_000, confirmations: 1 });
       setState({ status: "success", txHash: tx });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -268,7 +268,7 @@ export function useRecordActualSpend(tripId: bigint) {
           chainId: arcTestnet.id,
         });
         setState({ status: "pending", txHash: tx });
-        await publicClient?.waitForTransactionReceipt({ hash: tx });
+        await publicClient?.waitForTransactionReceipt({ hash: tx, timeout: 120_000, confirmations: 1 });
         setState({ status: "success", txHash: tx });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -301,10 +301,11 @@ export function useCreateTrip() {
           abi: MOAARK_ABI,
           functionName: "createTrip",
           args: [name, participants, targetBudget],
-          chainId: arcTestnet.id,
+          // chainId 고정 제거 — 지갑이 이미 Arc Testnet에 있어야 하며,
+          // 모달에서 체인 확인 후 진입하므로 여기서 강제 전환하지 않음
         });
         setState({ status: "pending", txHash: tx });
-        const receipt = await publicClient?.waitForTransactionReceipt({ hash: tx });
+        const receipt = await publicClient?.waitForTransactionReceipt({ hash: tx, timeout: 120_000, confirmations: 1 });
         // TripCreated(uint256 indexed tripId, address indexed admin, string name, uint256 targetBudget)
         // topic0 = keccak256("TripCreated(uint256,address,string,uint256)")
         const TRIP_CREATED_TOPIC =
@@ -348,7 +349,7 @@ export function useCancelSettlement(tripId: bigint) {
         chainId: arcTestnet.id,
       });
       setState({ status: "pending", txHash: tx });
-      await publicClient?.waitForTransactionReceipt({ hash: tx });
+      await publicClient?.waitForTransactionReceipt({ hash: tx, timeout: 120_000, confirmations: 1 });
       setState({ status: "success", txHash: tx });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

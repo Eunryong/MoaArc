@@ -34,9 +34,20 @@ export async function requireAuth(c: Context, next: Next) {
     .map((s) => s.trim())
     .find((s) => s.startsWith("moaarc_token="))
     ?.slice("moaarc_token=".length) ?? "";
+  // 4) URL 쿼리 파라미터 _t=<token>
+  //    Arc Studio 게이트웨이가 헤더와 쿠키를 모두 제거함 (실측 확인).
+  //    쿼리 파라미터는 URL의 일부이므로 게이트웨이가 제거하지 않음.
+  //    보안 주의: URL 로그에 토큰이 노출될 수 있으므로 개발/스튜디오 환경에서만 사용.
+  const queryToken = c.req.query("_t") ?? "";
+
   const rawToken = authHeader.startsWith("Bearer ")
     ? authHeader.slice(7)
-    : xAuthToken || cookieToken || null;
+    : xAuthToken || cookieToken || queryToken || null;
+
+  // 진단 로그: request id + 토큰 소스 존재 여부(boolean)만 기록, 값 미포함
+  const reqId = c.req.header("x-request-id") ?? Math.random().toString(36).slice(2, 8);
+  console.log(`[auth] reqId=${reqId} hasBearerHeader=${authHeader.startsWith("Bearer ")} hasXAuthToken=${!!xAuthToken} hasCookie=${!!cookieToken} hasQueryToken=${!!queryToken} hasToken=${!!rawToken}`);
+
   if (!rawToken) {
     return c.json({ error: "인증이 필요합니다." }, 401);
   }

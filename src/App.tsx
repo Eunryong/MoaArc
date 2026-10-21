@@ -24,6 +24,7 @@ import MyExpensesTab from "./components/MyExpensesTab";
 import ExpenseListTab from "./components/ExpenseListTab";
 import SettlementTab from "./components/SettlementTab";
 import ItineraryTab from "./components/ItineraryTab";
+import CreateTripModal from "./components/CreateTripModal";
 
 type Tab = "dashboard" | "my" | "expenses" | "settlement" | "itinerary";
 
@@ -73,6 +74,7 @@ export default function App() {
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([]);
 
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const [showCreateModal, setShowCreateModal] = useState(false);
 
   // ─── 지갑·체인 ─────────────────────────────────────────────────────────
   const { address, isConnected } = useAccount();
@@ -336,10 +338,12 @@ export default function App() {
             </div>
           )}
 
-          {/* 여행방 전환 (인증됨 + 여행방 2개 이상) */}
-          {isAuthenticated && serverTrips.length > 1 && (
+          {/* 여행방 전환 (인증됨) + 여행방 추가 버튼 */}
+          {isAuthenticated && !isWrongChain && (
             <div className="mb-2 flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-stone-500">여행방:</span>
+              {serverTrips.length > 0 && (
+                <span className="text-xs text-stone-500">여행방:</span>
+              )}
               {serverTrips.map((t) => (
                 <button
                   key={t.id}
@@ -353,6 +357,13 @@ export default function App() {
                   {t.name}
                 </button>
               ))}
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="px-2 py-0.5 rounded-full text-xs border border-dashed border-indigo-400 text-indigo-600 hover:bg-indigo-50 transition-colors"
+                title="여행방 추가"
+              >
+                + 여행방 추가
+              </button>
             </div>
           )}
 
@@ -486,20 +497,26 @@ export default function App() {
           </div>
         )}
 
-        {/* ── 인증됨 + API 200 + 빈 배열: 여행방 없음 + 생성 안내 ── */}
+        {/* ── 인증됨 + API 200 + 빈 배열: 여행방 없음 + 생성 CTA ── */}
         {serverOnline && isAuthenticated && !tripsLoading && !tripsError
           && tripsLoadedOnce && !trip && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
             <p className="text-3xl mb-3">🗺️</p>
             <h2 className="text-base font-semibold text-stone-700 mb-2">참여한 여행방이 없습니다</h2>
-            <p className="text-sm text-stone-500 mb-3">
-              Arc Testnet에서 스마트 컨트랙트로 여행방을 생성한 뒤 등록할 수 있습니다.
+            <p className="text-sm text-stone-500 mb-4">
+              Arc Testnet에서 스마트 컨트랙트로 여행방을 생성하고 여기에 등록하세요.
             </p>
-            <div className="text-xs text-stone-400 bg-stone-50 rounded-lg p-3 text-left space-y-1 max-w-sm mx-auto">
-              <p className="font-semibold text-stone-500">여행방 생성 방법</p>
-              <p>1. Arc Testnet에 연결된 지갑에서</p>
-              <p>2. <code className="font-mono bg-stone-100 px-1 rounded">createTrip</code> 트랜잭션을 실행하고</p>
-              <p>3. 트랜잭션 해시로 서버에 등록하세요</p>
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="px-5 py-2 rounded-full text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700"
+            >
+              + 여행방 추가
+            </button>
+            <div className="mt-4 text-xs text-stone-400 bg-stone-50 rounded-lg p-3 text-left space-y-1 max-w-sm mx-auto">
+              <p className="font-semibold text-stone-500">등록 방법</p>
+              <p>1. Arc Testnet 지갑에서 <code className="font-mono bg-stone-100 px-1 rounded">MoaArcTreasury.createTrip()</code> 실행</p>
+              <p>2. 트랜잭션이 완료되면 "여행방 추가" 버튼 클릭</p>
+              <p>3. 트랜잭션 해시와 참여자 정보 입력 후 등록</p>
             </div>
           </div>
         )}
@@ -545,6 +562,18 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* 여행방 추가 모달 */}
+      {showCreateModal && (
+        <CreateTripModal
+          onClose={() => setShowCreateModal(false)}
+          onCreated={(newTrip) => {
+            void reloadTrips();
+            setSelectedDbTripId(newTrip.id);
+          }}
+          connectedAddress={address}
+        />
+      )}
 
       {/* 하단 면책 */}
       <footer className="border-t border-stone-200 bg-white py-3 px-4">

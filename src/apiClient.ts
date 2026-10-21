@@ -50,16 +50,22 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   // explicitToken이 있으면 우선 사용 — 로그인 직후 React state 반영 전 stale closure 방지
   const token = explicitToken ?? getToken();
   // Authorization: Bearer 헤더를 설정하지만 Arc Studio 게이트웨이가 제거함 (확인됨).
-  // 쿠키(moaarc_token)가 실제 인증 전달 경로: saveToken()에서 document.cookie에도 저장.
+  // 쿠키도 제거됨 (서버 로그 실측: UUID reqId 요청에서 hasCookie=false).
+  // 쿼리 파라미터 _t 가 게이트웨이를 통과하는 유일한 전달 경로.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...((init?.headers as Record<string, string>) ?? {}),
   };
 
-  // credentials 기본값(same-origin) 사용 — 같은 origin 요청에 쿠키 자동 포함.
+  // 토큰이 있으면 URL 쿼리 파라미터 _t에도 추가 — 게이트웨이 우회
+  const url = token
+    ? `${API_BASE}${path}${path.includes("?") ? "&" : "?"}_t=${encodeURIComponent(token)}`
+    : `${API_BASE}${path}`;
+
+  // credentials 기본값(same-origin) 사용.
   // "include"는 Arc Studio 게이트웨이가 403으로 차단하므로 사용하지 않음.
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(url, {
     ...init,
     headers,
   });
