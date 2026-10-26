@@ -16,6 +16,8 @@ import {
   getNotifications,
   getToken,
   clearToken,
+  STUDIO_TEST_MODE,
+  getStudioTestAddress,
   ApiError,
   type TripApiRecord,
   type ItineraryApiItem,
@@ -48,18 +50,33 @@ export function useServerHealth() {
 
 // ─── 인증 상태 ────────────────────────────────────────────────────────────────
 
-export function useAuthState() {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => !!getToken());
+export function useAuthState(connectedAddress?: string) {
+  // [STUDIO_TEST_MODE] 지갑 연결만으로 인증된 것으로 간주
+  const [isAuthenticated, setIsAuthenticated] = useState(() =>
+    STUDIO_TEST_MODE ? !!connectedAddress : !!getToken()
+  );
   // 만료 구분: 토큰이 있었지만 서버가 401을 반환한 경우
   const [isExpired, setIsExpired] = useState(false);
 
+  // [STUDIO_TEST_MODE] 지갑 연결 주소가 바뀌면 인증 상태도 갱신
+  useEffect(() => {
+    if (STUDIO_TEST_MODE) {
+      setIsAuthenticated(!!connectedAddress);
+      if (!connectedAddress) setIsExpired(false);
+    }
+  }, [connectedAddress]);
+
   const refresh = useCallback(() => {
-    setIsAuthenticated(!!getToken());
-    setIsExpired(false); // 새 토큰 저장 후 만료 해제
-  }, []);
+    if (STUDIO_TEST_MODE) {
+      setIsAuthenticated(!!connectedAddress);
+    } else {
+      setIsAuthenticated(!!getToken());
+    }
+    setIsExpired(false);
+  }, [connectedAddress]);
 
   const markExpired = useCallback(() => {
-    clearToken();
+    if (!STUDIO_TEST_MODE) clearToken();
     setIsAuthenticated(false);
     setIsExpired(true);
   }, []);
@@ -87,7 +104,9 @@ export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
       skipNextAutoRef.current = false;
       return;
     }
-    if (!explicitToken && !getToken()) return;
+    // [STUDIO_TEST_MODE] as 주소가 설정돼 있으면 토큰 없이도 통과
+    const hasAccess = STUDIO_TEST_MODE ? !!getStudioTestAddress() : !!getToken();
+    if (!explicitToken && !hasAccess) return;
     setLoading(true);
     setError(null);
     try {
@@ -114,6 +133,13 @@ export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
   // 자동 실행: enabled가 true로 바뀔 때(isAuthenticated 반영 후)
   // reloadTrips(explicitToken)이 이미 진행 중이면 skipNextAutoRef로 1회 skip
   useEffect(() => { if (enabled) void load(); }, [enabled, load]);
+
+  // 30초 폴링: 새 여행방 추가 등 외부 변경 사항을 주기적으로 반영
+  useEffect(() => {
+    if (!enabled) return;
+    const id = setInterval(() => { void load(); }, 30_000);
+    return () => clearInterval(id);
+  }, [enabled, load]);
 
   // reload(token?): 인수 없으면 sessionStorage 토큰 사용, 있으면 직접 전달
   // explicitToken이 있으면 자동 effect가 같은 직후 중복 실행을 skip하도록 플래그 설정
@@ -144,7 +170,8 @@ export function useTripItinerary(dbTripId: string | null, enabled: boolean) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!enabled || !dbTripId || !getToken()) return;
+    const hasAccess = STUDIO_TEST_MODE ? !!getStudioTestAddress() : !!getToken();
+    if (!enabled || !dbTripId || !hasAccess) return;
     setLoading(true);
     setError(null);
     try {
@@ -169,7 +196,8 @@ export function useTripExpenses(dbTripId: string | null, enabled: boolean) {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!enabled || !dbTripId || !getToken()) return;
+    const hasAccess = STUDIO_TEST_MODE ? !!getStudioTestAddress() : !!getToken();
+    if (!enabled || !dbTripId || !hasAccess) return;
     setLoading(true);
     setError(null);
     try {
@@ -193,7 +221,8 @@ export function useTripNotifications(dbTripId: string | null, enabled: boolean) 
   const [unreadCount, setUnreadCount] = useState(0);
 
   const load = useCallback(async () => {
-    if (!enabled || !dbTripId || !getToken()) return;
+    const hasAccess = STUDIO_TEST_MODE ? !!getStudioTestAddress() : !!getToken();
+    if (!enabled || !dbTripId || !hasAccess) return;
     try {
       const data = await getNotifications(dbTripId);
       setNotifications(data);

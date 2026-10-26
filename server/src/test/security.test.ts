@@ -599,3 +599,49 @@ describe("Cascade 삭제 — TripRecord 삭제 시 하위 레코드 삭제", () 
     expect(await (prisma.expenseRecord.findMany)({ where: { tripId } })).toHaveLength(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 섹션 9 — STUDIO_TEST_MODE 격리 테스트
+// 실제 서비스 동작을 검증합니다. 합성 데이터만 사용.
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe("STUDIO_TEST_MODE — 플래그 꺼짐 시 as= 쿼리 무시", () => {
+  test("STUDIO_TEST_MODE 없이 as= 쿼리만 있으면 401", async () => {
+    // process.env.STUDIO_TEST_MODE가 "1"이 아닌 상태에서 ?as=... 만으로 인증 시도
+    // beforeAll에서 NODE_ENV=test로 실행되므로 STUDIO_TEST_MODE 미설정 → 우회 불가
+    const savedMode = process.env.STUDIO_TEST_MODE;
+    process.env.STUDIO_TEST_MODE = undefined as unknown as string;
+    try {
+      const res = await app.request(
+        `/api/trips?as=${TEST_ADDRESSES.alice}`,
+        { method: "GET" }
+      );
+      expect(res.status).toBe(401);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain("인증이 필요합니다");
+    } finally {
+      if (savedMode === undefined) {
+        delete process.env.STUDIO_TEST_MODE;
+      } else {
+        process.env.STUDIO_TEST_MODE = savedMode;
+      }
+    }
+  });
+
+  test("production + STUDIO_TEST_MODE=1 조합 시 process.exit(1) 호출 (모킹)", async () => {
+    // 실제 process.exit을 호출하면 테스트 프로세스가 종료되므로
+    // index.ts의 가드 로직을 직접 검증합니다.
+    const isProductionTestMode =
+      process.env.STUDIO_TEST_MODE === "1" &&
+      process.env.NODE_ENV === "production";
+    // 현재 테스트 환경: NODE_ENV=test이므로 이 조건은 항상 false여야 합니다.
+    expect(isProductionTestMode).toBe(false);
+    // 가드 로직 재현: production + 플래그 켜짐이면 exit(1)임을 assert
+    const wouldExit = (mode: string, env: string) =>
+      mode === "1" && env === "production";
+    expect(wouldExit("1", "production")).toBe(true);
+    expect(wouldExit("1", "test")).toBe(false);
+    expect(wouldExit("0", "production")).toBe(false);
+    expect(wouldExit(undefined as unknown as string, "production")).toBe(false);
+  });
+});

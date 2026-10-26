@@ -7,6 +7,18 @@ import type { Context } from "hono";
 import { verifyCreateTripTx, fetchOnchainParticipants, ARC_TESTNET_CHAIN_ID } from "../lib/chain.js";
 import * as repo from "../repositories/trip.repository.js";
 
+// ─── 터널 body 파싱 ──────────────────────────────────────────────────────────
+// GET ?_method=POST&_body=<base64> 터널 요청에서는 실제 HTTP body가 없습니다.
+// _tunnelBody context 값을 우선 사용하고, 없으면 req.json() 으로 fallback합니다.
+async function parseBody<T>(c: Context): Promise<T> {
+  const tunnelBody = c.get("_tunnelBody" as never) as string | undefined;
+  if (tunnelBody) {
+    try { return JSON.parse(tunnelBody) as T; }
+    catch { throw Object.assign(new Error("터널 body JSON 파싱 실패"), { status: 400 }); }
+  }
+  return c.req.json<T>();
+}
+
 // ─── 입력 검증 상수 ───────────────────────────────────────────────────────────
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/i;
@@ -69,12 +81,12 @@ export async function listTrips(c: Context) {
 
 export async function createTrip(c: Context) {
   const caller = c.get("callerAddress");
-  const body = await c.req.json<{
+  const body = await parseBody<{
     txHash: string;
     chainId: number;
     contractAddress: string;
     participants: { address: string; displayName: string }[];
-  }>();
+  }>(c);
 
   const { txHash, chainId, contractAddress, participants } = body ?? {};
   if (!txHash || !chainId || !contractAddress || !Array.isArray(participants)) {
@@ -157,10 +169,10 @@ export async function getItinerary(c: Context) {
 export async function addItineraryItem(c: Context) {
   const trip = c.get("tripRecord");
   const caller = c.get("callerAddress");
-  const body = await c.req.json<{
+  const body = await parseBody<{
     date: string; time?: string; location: string;
     activity: string; participants?: string[]; notes?: string;
-  }>();
+  }>(c);
 
   try {
     const date = assertDate(body.date, "date");
@@ -187,12 +199,12 @@ export async function addItineraryItem(c: Context) {
 export async function patchItineraryItem(c: Context) {
   const trip = c.get("tripRecord");
   const itemId = c.req.param("itemId");
-  const body = await c.req.json<Partial<{
+  const body = await parseBody<Partial<{
     date: string; time: string; location: string; activity: string;
     participants: string[]; notes: string; status: string;
     estMinUsdc: string; estMaxUsdc: string; estCurrency: string;
     estSource: string; confidence: string;
-  }>>();
+  }>>(c);
 
   const existing = await repo.findItineraryItem(itemId, trip.id);
   if (!existing) return c.json({ error: "일정을 찾을 수 없습니다." }, 404);
@@ -231,12 +243,12 @@ export async function getExpenses(c: Context) {
 export async function addExpense(c: Context) {
   const trip = c.get("tripRecord");
   const caller = c.get("callerAddress");
-  const body = await c.req.json<{
+  const body = await parseBody<{
     title: string; category: string; date: string;
     totalUsdc: string; paymentFlow: string;
     localCurrency?: string; localAmount?: number; receiptNote?: string;
     shares: { address: string; amountUsdc: string }[];
-  }>();
+  }>(c);
 
   if (!body.title || !body.category || !body.date || !body.totalUsdc || !body.paymentFlow) {
     return c.json({ error: "title, category, date, totalUsdc, paymentFlow 필드가 필요합니다." }, 400);
@@ -285,10 +297,10 @@ export async function approveExpense(c: Context) {
   const caller = c.get("callerAddress");
   const isAdmin = c.get("isAdmin");
   const expenseId = c.req.param("expenseId");
-  const body = await c.req.json<{
+  const body = await parseBody<{
     action: string; reason?: string;
     newShares?: { address: string; amountUsdc: string }[];
-  }>();
+  }>(c);
 
   if (!APPROVAL_ACTION.has(body.action)) {
     return c.json({ error: "action은 '승인' 또는 '수정요청' 이어야 합니다." }, 400);

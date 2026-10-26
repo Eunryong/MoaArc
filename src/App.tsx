@@ -16,6 +16,8 @@ import {
   fetchNonce,
   verifySignature,
   clearToken,
+  STUDIO_TEST_MODE,
+  setStudioTestAddress,
   type TripApiRecord,
 } from "./apiClient";
 import TopSummaryBar from "./components/TopSummaryBar";
@@ -84,7 +86,12 @@ export default function App() {
 
   // ─── 서버 상태 ─────────────────────────────────────────────────────────
   const { serverOnline, geminiConfigured, checking: serverChecking } = useServerHealth();
-  const { isAuthenticated, isExpired, refresh: refreshAuth, markExpired } = useAuthState();
+  const { isAuthenticated, isExpired, refresh: refreshAuth, markExpired } = useAuthState(address);
+
+  // [STUDIO_TEST_MODE] 지갑 주소를 apiClient에 동기화
+  useEffect(() => {
+    if (STUDIO_TEST_MODE) setStudioTestAddress(address ?? null);
+  }, [address]);
 
   // ─── 여행방 목록 ───────────────────────────────────────────────────────
   // 서버 온라인 + 인증됨일 때만 활성화. 401 발생 시 markExpired 호출
@@ -107,6 +114,7 @@ export default function App() {
   );
   const {
     expenses: serverExpenses,
+    reload: reloadExpenses,
   } = useTripExpenses(
     selectedDbTripId,
     serverOnline && isAuthenticated && !!selectedDbTripId
@@ -143,8 +151,63 @@ export default function App() {
     if (serverItinerary.length > 0 || serverExpenses.length > 0) {
       setTrip((prev) => {
         if (!prev) return prev;
+
+        // 서버 지출 레코드 → Expense 타입 변환
+        // address(0x...) → ParticipantId("A","B",...) 역매핑 헬퍼
+        const addrToId = (addr: string): ParticipantId => {
+          const found = prev.participants.find(
+            (p) => p.address.toLowerCase() === addr.toLowerCase()
+          );
+          return (found?.id ?? addr.slice(2, 4)) as ParticipantId;
+        };
+
+        const mappedExpenses: import("./types").Expense[] = serverExpenses.map((e) => {
+          const versions: import("./types").ExpenseVersion[] = e.versions.map((v) => {
+            const shares = (JSON.parse(v.shares) as { address: string; amountUsdc: string }[]).map((s) => ({
+              participantId: addrToId(s.address),
+              amount: BigInt(s.amountUsdc),
+            }));
+            return {
+              version: v.version,
+              shares,
+              proposedBy: addrToId(v.proposedBy),
+              proposedAt: v.proposedAt,
+              reason: v.reason,
+              approvals: v.approvals.map((a) => ({
+                participantId: addrToId(a.address),
+                approvedAt: a.action === "승인" ? a.approvedAt : null,
+                action: (a.action === "승인" || a.action === "수정요청") ? a.action : null,
+                reason: a.reason ?? undefined,
+              })),
+              status: v.status as import("./types").ExpenseStatus,
+            };
+          });
+          const participants = versions[0]
+            ? versions[0].shares.map((s) => s.participantId)
+            : [];
+          return {
+            id: e.id,
+            tripId: selectedDbTripId ?? "",
+            title: e.title,
+            category: e.category as ExpenseCategory,
+            date: e.date,
+            paidBy: addrToId(e.payerAddress),
+            totalAmount: BigInt(e.totalUsdc),
+            paymentFlow: e.paymentFlow as import("./types").PaymentFlowType,
+            participants,
+            currentVersion: e.currentVersion,
+            versions,
+            status: e.status as import("./types").ExpenseStatus,
+            refunds: [],
+            localCurrency: e.localCurrency ?? undefined,
+            localAmount: e.localAmount ?? undefined,
+            receiptNote: e.receiptNote ?? undefined,
+          };
+        });
+
         return {
           ...prev,
+          expenses: mappedExpenses,
           itinerary: serverItinerary.map((i) => ({
             id: i.id,
             tripId: selectedDbTripId ?? "",
@@ -176,7 +239,8 @@ export default function App() {
         };
       });
     }
-  }, [serverItinerary, serverExpenses, selectedDbTripId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- trip은 setTrip(prev=>) 내부에서만 쓰여 dep 불필요
+  }, [serverItinerary, serverExpenses, selectedDbTripId]); // trip 의도적 제외: setTrip(prev=>) 패턴
 
   // ─── 지갑 주소 변경 시 데이터 초기화 ──────────────────────────────────
   // address ref: 실제 주소가 달라진 경우(A→B)에만 토큰을 삭제한다.
@@ -286,6 +350,14 @@ export default function App() {
             </div>
             <ConnectKitButton />
           </div>
+
+          {/* [STUDIO_TEST_MODE] 인증 우회 배지 */}
+          {STUDIO_TEST_MODE && (
+            <div className="mb-2 bg-yellow-100 border border-yellow-400 rounded-lg px-3 py-1.5 text-xs font-bold text-yellow-800 flex items-center gap-2">
+              <span>⚠️ TEST MODE: 서버 인증 우회 (Studio 전용)</span>
+              <span className="font-normal text-yellow-700">— 실제 자금·메인넷 사용 금지</span>
+            </div>
+          )}
 
           {/* 체인 경고 — 잘못된 체인이면 이 배너만 표시하고 인증 UI는 숨김 */}
           {isWrongChain && (
@@ -397,6 +469,13 @@ export default function App() {
                 title="여행방 추가"
               >
                 + 여행방 추가
+              </button>
+              <button
+                onClick={() => { void reloadTrips(); }}
+                className="px-2 py-0.5 rounded-full text-xs border border-stone-300 text-stone-500 hover:bg-stone-100 transition-colors"
+                title="여행방 목록 새로고침"
+              >
+                ↻
               </button>
             </div>
           )}
@@ -573,6 +652,10 @@ export default function App() {
             trip={trip}
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
+            dbTripId={selectedDbTripId ?? ""}
+            onExpenseReload={reloadExpenses}
+            allTrips={serverTrips ?? []}
+            onTripSelect={setSelectedDbTripId}
           />
         )}
         {trip && activeTab === "settlement" && (

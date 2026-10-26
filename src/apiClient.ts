@@ -19,6 +19,24 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 const TOKEN_KEY = "moaarc_auth_token";
 
+/**
+ * [STUDIO_TEST_MODE] Arc Studio 프리뷰 전용 인증 우회.
+ * import.meta.env.DEV && VITE_STUDIO_TEST_MODE==="1" 일 때만 활성.
+ * 보호 API 요청 URL에 ?as=<address> 를 추가해 서버 인증을 우회합니다.
+ * 프로덕션 배포 전 반드시 제거 — docs/STUDIO_TEST_MODE.md 참고.
+ */
+export const STUDIO_TEST_MODE =
+  import.meta.env.DEV === true &&
+  import.meta.env.VITE_STUDIO_TEST_MODE === "1";
+
+let _studioTestAddress: string | null = null;
+export function setStudioTestAddress(addr: string | null) {
+  _studioTestAddress = addr;
+}
+export function getStudioTestAddress(): string | null {
+  return _studioTestAddress;
+}
+
 // ─── 토큰 관리 ────────────────────────────────────────────────────────────────
 // 토큰은 localStorage에만 보관합니다.
 // Authorization: Bearer 헤더로만 전송하며, 쿠키/URL 경로는 사용하지 않습니다.
@@ -58,15 +76,21 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   let fetchUrl: string;
   let fetchInit: RequestInit;
 
+  // [STUDIO_TEST_MODE] 보호 API에 ?as=<address> 쿼리 추가
+  const studioAs = STUDIO_TEST_MODE ? _studioTestAddress : null;
+
   if (isMutating) {
     const base = `${API_BASE}${path}`;
     const params = new URLSearchParams();
     params.set("_method", method);
-    if (init?.body) params.set("_body", btoa(unescape(encodeURIComponent(String(init.body)))));
+    if (init?.body) params.set("_body", btoa(unescape(encodeURIComponent(typeof init.body === "string" ? init.body : JSON.stringify(init.body)))));
+    if (studioAs) params.set("as", studioAs);
     fetchUrl = `${base}${base.includes("?") ? "&" : "?"}${params.toString()}`;
     fetchInit = { headers };
   } else {
-    fetchUrl = `${API_BASE}${path}`;
+    const base = `${API_BASE}${path}`;
+    const sep = base.includes("?") ? "&" : "?";
+    fetchUrl = studioAs ? `${base}${sep}as=${encodeURIComponent(studioAs)}` : base;
     fetchInit = { ...init, headers };
   }
 

@@ -115,14 +115,41 @@ app.route("/api/intent", intent);
 
 // ─── 에러 핸들러 ─────────────────────────────────────────────────────────────
 app.onError((err, c) => {
-  // 민감 정보가 스택 트레이스에 노출되지 않도록 개발 환경에서만 출력
-  if (process.env.NODE_ENV === "development") {
-    console.error(err);
-  } else {
+  const isProd = process.env.NODE_ENV === "production";
+  // production: 스택 트레이스 미노출. 개발: 전체 출력
+  if (isProd) {
     console.error("[server error]", err.message);
+  } else {
+    console.error("[server error]", err);
   }
-  return c.json({ error: "서버 오류가 발생했습니다." }, 500);
+  // RangeError(입력 검증 실패)는 400으로 클라이언트에 메시지 노출
+  if (err instanceof RangeError) {
+    return c.json({ error: err.message }, 400);
+  }
+  // production: 일반 오류 메시지로 숨김. 개발: 실제 메시지 노출
+  const msg = isProd ? "서버 오류가 발생했습니다." : err.message;
+  return c.json({ error: msg }, 500);
 });
+
+// ─── STUDIO_TEST_MODE 안전 가드 ──────────────────────────────────────────────
+if (process.env.STUDIO_TEST_MODE === "1") {
+  if (process.env.NODE_ENV === "production") {
+    console.error(
+      "[FATAL] STUDIO_TEST_MODE=1 is set in a production environment. " +
+      "This mode bypasses authentication and must never run in production. Exiting."
+    );
+    process.exit(1);
+  }
+  console.warn(
+    "\n" +
+    "╔══════════════════════════════════════════════════════════════╗\n" +
+    "║  ⚠  INSECURE TEST MODE: 인증 우회 활성                      ║\n" +
+    "║     Arc Testnet 합성 데이터 전용 — 실제 자금 사용 금지       ║\n" +
+    "║     메인넷/외부 배포 전 반드시 제거하세요                     ║\n" +
+    "║     docs/STUDIO_TEST_MODE.md 참고                            ║\n" +
+    "╚══════════════════════════════════════════════════════════════╝\n"
+  );
+}
 
 // ─── 서버 시작 ────────────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== "test") {

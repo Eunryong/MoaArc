@@ -1,9 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Trip, ParticipantId } from "../types";
 import {
-  getContractBalance,
   getTotalAllocated,
-  getTotalDeposited,
   getTotalConfirmedExpenses,
   getTotalPendingExpenses,
   getPendingExpenseCount,
@@ -19,9 +17,11 @@ import {
   txStatusColor,
   txExplorerUrl,
 } from "../useContractWrite";
-
-// 온체인 tripId는 trip 데이터에서 읽음
-const ONCHAIN_TRIP_ID = 1n;
+import {
+  useTripBalance,
+  useDepositedAmount,
+  useUsdcBalance,
+} from "../useContractState";
 
 interface Props {
   trip: Trip;
@@ -32,7 +32,7 @@ interface Props {
   isWrongChain?: boolean;
 }
 
-export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTripUpdate, connectedAddress: _connectedAddress, isWrongChain }: Props) {
+export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTripUpdate, connectedAddress, isWrongChain }: Props) {
   const [depositInput, setDepositInput] = useState("");
   const [depositMsg, setDepositMsg] = useState("");
   const [releaseInput, setReleaseInput] = useState("");
@@ -42,20 +42,43 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
   const [returnInput, setReturnInput] = useState("");
   const [returnMsg, setReturnMsg] = useState("");
 
+  const onchainTripId = trip.onchainTripId ?? 0n;  // bigint from DB ("1" → 1n); 0n fallback이면 훅은 enabled=false로 차단됨
   const isAdmin = trip.participants.find((p) => p.id === currentUserId)?.isAdmin ?? false;
-  const contractBalance = getContractBalance(trip);
   const totalAllocated = getTotalAllocated(trip);
-  const totalDeposited = getTotalDeposited(trip);
   const confirmedExpenses = getTotalConfirmedExpenses(trip);
   const pendingExpenses = getTotalPendingExpenses(trip);
   const pendingCount = getPendingExpenseCount(trip);
   const me = trip.participants.find((p) => p.id === currentUserId)!;
   const summary = calcParticipantSummary(trip, currentUserId);
 
-  // 온체인 훅 (실지갑 모드 전용)
-  const depositHook = useDeposit(ONCHAIN_TRIP_ID);
-  const releaseHook = useReleaseBudget(ONCHAIN_TRIP_ID);
-  const returnHook = useReturnUnusedBudget(ONCHAIN_TRIP_ID);
+  // ─── 컨트랙트 실시간 읽기 ──────────────────────────────────────────────
+  const enabled = onchainTripId > 0n;
+  const tripBalanceResult = useTripBalance(onchainTripId, enabled);
+  const myDepositResult = useDepositedAmount(onchainTripId, connectedAddress, enabled && !!connectedAddress);
+  const myUsdcResult = useUsdcBalance(connectedAddress, !!connectedAddress);
+
+  // 읽기 결과 (실패 = undefined, 로딩 중 = undefined)
+  const contractBalance: bigint | undefined = tripBalanceResult.data;
+  const myDepositOnchain: bigint | undefined = myDepositResult.data;
+  const myUsdcBalance: bigint | undefined = myUsdcResult.data;
+  const contractBalanceError = tripBalanceResult.isError;
+  const myDepositError = myDepositResult.isError;
+  const myUsdcError = myUsdcResult.isError;
+
+  // ─── 온체인 훅 (쓰기 전용) ────────────────────────────────────────────
+  const depositHook = useDeposit(onchainTripId);
+  const releaseHook = useReleaseBudget(onchainTripId);
+  const returnHook = useReturnUnusedBudget(onchainTripId);
+
+  // deposit 성공 후 read 훅 refetch
+  useEffect(() => {
+    if (depositHook.state.status === "success") {
+      void tripBalanceResult.refetch();
+      void myDepositResult.refetch();
+      void myUsdcResult.refetch();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depositHook.state.status]);
 
   // ─── 온체인 핸들러 ──────────────────────────────────────────────────────
 
@@ -111,12 +134,19 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
       <div className="bg-white rounded-xl border border-stone-200 p-4">
         <h3 className="text-sm font-semibold text-stone-700 mb-3">공동지갑 현황</h3>
         <div className="grid grid-cols-2 gap-2 text-sm">
-          <Row label="총 입금액" value={`${fmtUsdc(totalDeposited)} USDC`} />
-          <Row label="공동지갑 실제 잔액" value={`${fmtUsdc(contractBalance)} USDC`} highlight />
+          <Row
+            label="총 입금액 (tripBalance)"
+            value={contractBalanceError ? "읽기 실패" : contractBalance === undefined ? "조회 중…" : `${fmtUsdc(contractBalance)} USDC`}
+            highlight
+          />
+          <Row
+            label="내 입금 완료액"
+            value={myDepositError ? "읽기 실패" : myDepositOnchain === undefined ? "조회 중…" : `${fmtUsdc(myDepositOnchain)} USDC`}
+          />
           <Row
             label="외부 결제지갑 공동자금"
             value={`${fmtUsdc(totalAllocated)} USDC`}
-            note="※ 공동지갑과 중복 아님 — 외부 지갑에 있는 공동자금"
+            note="※ 공동지갑과 중복 아님"
           />
           <Row label="확정 누적 지출" value={`${fmtUsdc(confirmedExpenses)} USDC`} />
           <Row
@@ -126,11 +156,6 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
           />
           <Row label="목표 예산" value={`${fmtUsdc(trip.targetBudget)} USDC`} />
         </div>
-        {trip.onchainTripBalance !== undefined && (
-          <p className="text-xs text-indigo-600 mt-2">
-            온체인 tripBalance: {fmtUsdc(trip.onchainTripBalance)} USDC (실시간 읽기)
-          </p>
-        )}
       </div>
 
       {/* 컨트랙트 주소 */}
@@ -155,13 +180,17 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
         <div className="flex items-center gap-2 mb-1">
           <h3 className="text-sm font-semibold text-stone-700">공동지갑 입금</h3>
         </div>
+        <p className="text-xs text-stone-400 mb-1">
+          내 입금 완료액 (온체인):{" "}
+          <strong className="text-stone-700">
+            {myDepositError ? "읽기 실패" : myDepositOnchain === undefined ? "조회 중…" : `${fmtUsdc(myDepositOnchain)} USDC`}
+          </strong>
+        </p>
         <p className="text-xs text-stone-400 mb-3">
-          내 입금 완료액: <strong className="text-stone-700">{fmtUsdc(summary.depositedAmount)} USDC</strong>
-          {summary.plannedDeposit > summary.depositedAmount && (
-            <span className="ml-2 text-amber-600">
-              (예정액 {fmtUsdc(summary.plannedDeposit)} USDC 중 미입금)
-            </span>
-          )}
+          내 지갑 USDC 잔액:{" "}
+          <strong className="text-stone-700">
+            {myUsdcError ? "읽기 실패" : myUsdcBalance === undefined ? "조회 중…" : `${fmtUsdc(myUsdcBalance)} USDC`}
+          </strong>
         </p>
         <div className="flex gap-2">
           <input
@@ -175,7 +204,7 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
           />
           <button
             onClick={() => { void handleDeposit(); }}
-            disabled={depositHook.state.status === "pending" || !!isWrongChain}
+            disabled={depositHook.state.status === "pending" || depositHook.state.status === "waiting_approval" || !!isWrongChain}
             title={isWrongChain ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
             className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
