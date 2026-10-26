@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useAccount, useChainId, useSignMessage } from "wagmi";
+import { useAccount, useChainId, useSignMessage, useSwitchChain } from "wagmi";
 import { ConnectKitButton } from "connectkit";
 import { arcTestnet } from "viem/chains";
 import type { ParticipantId, Trip, AgentMessage, ExpenseCategory } from "./types";
@@ -24,7 +24,7 @@ import MyExpensesTab from "./components/MyExpensesTab";
 import ExpenseListTab from "./components/ExpenseListTab";
 import SettlementTab from "./components/SettlementTab";
 import ItineraryTab from "./components/ItineraryTab";
-import CreateTripModal from "./components/CreateTripModal";
+import { CreateTripModal } from "./components/CreateTripModal";
 
 type Tab = "dashboard" | "my" | "expenses" | "settlement" | "itinerary";
 
@@ -80,6 +80,7 @@ export default function App() {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { signMessageAsync } = useSignMessage();
+  const { switchChain, isPending: isSwitchingChain, error: switchChainError } = useSwitchChain();
 
   // ─── 서버 상태 ─────────────────────────────────────────────────────────
   const { serverOnline, geminiConfigured, checking: serverChecking } = useServerHealth();
@@ -287,7 +288,25 @@ export default function App() {
           {/* 체인 경고 — 잘못된 체인이면 이 배너만 표시하고 인증 UI는 숨김 */}
           {isWrongChain && (
             <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
-              ⚠️ Arc Testnet (Chain ID: 5042002)으로 전환해주세요. 현재: {chainId}
+              <div className="flex items-center justify-between gap-2">
+                <span>⚠️ Arc Testnet (Chain ID: 5042002)으로 전환해주세요. 현재: {chainId}</span>
+                <button
+                  onClick={() => switchChain({ chainId: arcTestnet.id })}
+                  disabled={isSwitchingChain}
+                  className="shrink-0 px-2 py-1 rounded-full bg-rose-600 text-white font-semibold hover:bg-rose-700 disabled:opacity-50"
+                >
+                  {isSwitchingChain ? "전환 중…" : "Arc Testnet으로 전환"}
+                </button>
+              </div>
+              {switchChainError && (
+                <p className="mt-1 text-rose-600">
+                  {switchChainError.message.includes("rejected") || switchChainError.message.includes("denied")
+                    ? "지갑에서 네트워크 전환을 취소했습니다."
+                    : switchChainError.message.includes("Unrecognized chain")
+                      ? "지갑이 Arc Testnet을 인식하지 못했습니다. 지갑에서 직접 Arc Testnet을 추가한 뒤 다시 시도하세요."
+                      : "네트워크 전환 실패. 지갑에서 직접 Arc Testnet으로 전환해주세요."}
+                </p>
+              )}
             </div>
           )}
 
@@ -567,11 +586,12 @@ export default function App() {
       {showCreateModal && (
         <CreateTripModal
           onClose={() => setShowCreateModal(false)}
-          onCreated={(newTrip) => {
+          onCreated={(newTrip: import("./apiClient").TripApiRecord) => {
             void reloadTrips();
             setSelectedDbTripId(newTrip.id);
+            setShowCreateModal(false);
           }}
-          connectedAddress={address}
+          connectedAddress={address ?? ""}
         />
       )}
 

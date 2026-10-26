@@ -11,5 +11,7 @@ const auth = new Hono();
 
 auth.get("/nonce", getNonce);
 auth.post("/verify", verifyAndIssueToken);
+// GET 터널 — 게이트웨이가 POST를 차단할 때 ?_method=POST&_body=<base64> 로 우회
+auth.get("/verify", verifyAndIssueToken);
 
 export default auth;

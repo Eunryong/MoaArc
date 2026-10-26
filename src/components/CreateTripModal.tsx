@@ -1,289 +1,305 @@
 /**
- * CreateTripModal — 여행방 생성 전체 흐름
+ * CreateTripModal — 여행방 생성
  *
- * 1. 사용자가 여행방 이름, 목표 예산, 참여자 목록을 입력
- * 2. "생성하기" 클릭 → useCreateTrip으로 온체인 createTrip() 트랜잭션 실행 (지갑 서명 요청)
- * 3. 트랜잭션 완료 후 txHash + contractAddress + participants를 서버에 자동 등록
- * 4. 완료 콜백으로 App에 새 여행방 전달
+ * 흐름:
+ *  1. 사용자가 여행방 이름·참여자·예산 입력
+ *  2. "생성하기" → POST /api/intent/create-trip (calldata 수신)
+ *  3. useSendTransaction으로 지갑 서명 요청 (calldata를 그대로 전달)
+ *  4. 지갑이 txHash 반환 → POST /api/intent/:id/submit
+ *  5. 백엔드가 RPC에서 영수증 확인 — useQuery로 polling (2초 간격, confirmed시 중단)
+ *  6. confirmed → 여행방 목록 갱신 + 모달 닫기
+ *
+ * 프론트엔드에서 waitForTransactionReceipt를 사용하지 않습니다.
+ * 컨트랙트 ABI·RPC·이벤트 파싱은 모두 백엔드가 담당합니다.
  */
 
 import { useState, useCallback } from "react";
-import { useChainId } from "wagmi";
-import { useCreateTrip } from "../useContractWrite";
-import { registerTrip, type TripApiRecord } from "../apiClient";
-import { MOAARK_ADDRESS } from "../contractAbi";
+import { useSendTransaction, useChainId } from "wagmi";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  prepareCreateTripIntent,
+  submitTripIntentTxHash,
+  getIntentStatus,
+  getToken,
+  type TripApiRecord,
+} from "../apiClient";
 
 const ARC_TESTNET_CHAIN_ID = 5042002;
+
+interface Participant {
+  name: string;
+  address: string;
+}
 
 interface Props {
   onClose: () => void;
   onCreated: (trip: TripApiRecord) => void;
-  connectedAddress?: string;
+  connectedAddress: string;
 }
 
-interface Participant {
-  displayName: string;
-  address: string;
+type Step =
+  | "form"              // 입력 중
+  | "preparing"         // intent 준비 중
+  | "awaiting_wallet"   // 지갑 서명 대기
+  | "polling"           // 백엔드 영수증 확인 중
+  | "error";
+
+function parseError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (msg.includes("User rejected") || msg.includes("user rejected")) return "지갑에서 서명을 취소했습니다.";
+  if (msg.includes("does not match the target chain")) return "지갑을 Arc Testnet으로 전환하세요.";
+  if (msg.includes("insufficient funds")) return "잔액이 부족합니다.";
+  return msg.split("\n")[0].slice(0, 120);
 }
 
-export default function CreateTripModal({ onClose, onCreated, connectedAddress }: Props) {
+export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props) {
   const chainId = useChainId();
   const isWrongChain = chainId !== ARC_TESTNET_CHAIN_ID;
 
-  const [name, setName] = useState("");
-  const [targetBudget, setTargetBudget] = useState("");
-  const [participants, setParticipants] = useState<Participant[]>([
-    { displayName: "나", address: connectedAddress ?? "" },
-    { displayName: "", address: "" },
-  ]);
-  const [step, setStep] = useState<"form" | "tx" | "registering" | "done" | "error">("form");
+  const [step, setStep] = useState<Step>("form");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [intentId, setIntentId] = useState<string | null>(null);
 
-  const { state: txState, execute: executeCreateTrip } = useCreateTrip();
+  // 폼 상태
+  const [tripName, setTripName] = useState("");
+  const [budgetInput, setBudgetInput] = useState("");
+  const [participants, setParticipants] = useState<Participant[]>([
+    { name: "나", address: connectedAddress },
+  ]);
 
-  const updateParticipant = (i: number, field: keyof Participant, val: string) => {
-    setParticipants((prev) => prev.map((p, idx) => idx === i ? { ...p, [field]: val } : p));
-  };
+  const { sendTransactionAsync } = useSendTransaction();
+  const queryClient = useQueryClient();
 
-  const addParticipant = () => setParticipants((prev) => [...prev, { displayName: "", address: "" }]);
-  const removeParticipant = (i: number) => setParticipants((prev) => prev.filter((_, idx) => idx !== i));
+  // ─── intent 상태 polling ──────────────────────────────────────────────────
+  const { data: intentStatus } = useQuery({
+    queryKey: ["intent", intentId],
+    queryFn: () => getIntentStatus(intentId!),
+    enabled: step === "polling" && !!intentId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (!status || status === "submitted" || status === "pending_tx") return 2000;
+      return false; // confirmed / failed / reverted → 중단
+    },
+  });
 
-  const validParticipants = participants.filter(
-    (p) => p.address.trim().startsWith("0x") && p.address.trim().length >= 10
-  );
+  // polling 결과 처리
+  if (intentStatus?.status === "confirmed" && intentStatus.trip) {
+    onCreated(intentStatus.trip);
+    void queryClient.invalidateQueries({ queryKey: ["trips"] });
+  }
+  if (
+    intentStatus?.status === "failed" ||
+    intentStatus?.status === "reverted"
+  ) {
+    if (step === "polling") {
+      setStep("error");
+      setErrorMsg(intentStatus.error ?? "트랜잭션이 실패했습니다.");
+    }
+  }
 
+  // ─── 참여자 관리 ───────────────────────────────────────────────────────────
+  const addParticipant = () =>
+    setParticipants((ps) => [...ps, { name: "", address: "" }]);
+  const removeParticipant = (i: number) =>
+    setParticipants((ps) => ps.filter((_, idx) => idx !== i));
+  const updateParticipant = (i: number, field: keyof Participant, value: string) =>
+    setParticipants((ps) => ps.map((p, idx) => idx === i ? { ...p, [field]: value } : p));
+
+  // ─── 생성 실행 ──────────────────────────────────────────────────────────────
   const handleCreate = useCallback(async () => {
+    if (!tripName.trim()) { setErrorMsg("여행방 이름을 입력하세요."); return; }
+    if (isWrongChain) { setErrorMsg("Arc Testnet으로 전환하세요."); return; }
+
+    const budgetUSDC = Number(budgetInput || "0");
+    if (budgetInput && budgetUSDC < 0) { setErrorMsg("예산은 0 이상이어야 합니다."); return; }
+    const targetBudgetMicro = BigInt(Math.round(budgetUSDC * 1_000_000));
+
+    const otherParticipants = participants
+      .filter((p) => p.address.trim() && p.address.toLowerCase() !== connectedAddress.toLowerCase())
+      .map((p) => p.address.trim() as `0x${string}`);
+
+    setStep("preparing");
     setErrorMsg(null);
 
-    if (!name.trim()) { setErrorMsg("여행방 이름을 입력하세요."); return; }
-    if (validParticipants.length === 0) { setErrorMsg("참여자 주소를 올바르게 입력하세요."); return; }
-    const budgetUSDC = targetBudget.trim() === "" ? 0 : parseFloat(targetBudget);
-    if (isNaN(budgetUSDC) || budgetUSDC < 0) { setErrorMsg("목표 예산은 0 이상으로 입력하세요."); return; }
+    // 토큰 확인 — 없으면 재로그인 안내
+    if (!getToken()) {
+      setErrorMsg("로그인이 필요합니다. 지갑 서명으로 다시 로그인해주세요.");
+      setStep("form");
+      return;
+    }
 
-    const budgetMicro = BigInt(Math.round(budgetUSDC * 1_000_000)); // USDC 6 decimals
-    const addrs = validParticipants.map((p) => p.address.trim() as `0x${string}`);
+    try {
+      // 1. 백엔드에서 intent 준비 + calldata 수신
+      const intentResp = await prepareCreateTripIntent({
+        tripName: tripName.trim(),
+        participantAddresses: otherParticipants,
+        targetBudget: targetBudgetMicro.toString(),
+      });
 
-    setStep("tx");
+      setIntentId(intentResp.intentId);
+      setStep("awaiting_wallet");
 
-    // Step 1: 온체인 트랜잭션 (지갑 서명 요청)
-    await executeCreateTrip(name.trim(), addrs, budgetMicro);
-  }, [name, targetBudget, validParticipants, executeCreateTrip]);
+      // 2. 지갑 서명 — calldata를 그대로 전달, 영수증 조회는 하지 않음
+      const txHash = await sendTransactionAsync({
+        to: intentResp.tx.to,
+        data: intentResp.tx.data,
+        value: BigInt(intentResp.tx.value),
+      });
 
-  // txState 변화를 감지해 서버 등록 진행
-  const prevTxStatus = txState.status;
-  if (prevTxStatus === "success" && txState.txHash && txState.tripId !== undefined && step === "tx") {
-    setStep("registering");
-    void (async () => {
-      try {
-        const newTrip = await registerTrip({
-          txHash: txState.txHash!,
-          chainId: ARC_TESTNET_CHAIN_ID,
-          contractAddress: MOAARK_ADDRESS,
-          participants: validParticipants.map((p) => ({
-            address: p.address.trim().toLowerCase(),
-            displayName: p.displayName.trim() || p.address.slice(0, 6),
-          })),
-        });
-        setStep("done");
-        onCreated(newTrip);
-      } catch (e) {
-        setErrorMsg(`서버 등록 실패: ${e instanceof Error ? e.message : String(e)}`);
-        setStep("error");
+      // 3. txHash를 백엔드에 제출
+      const submitResult = await submitTripIntentTxHash(intentResp.intentId, txHash);
+
+      if (submitResult.status === "confirmed" && submitResult.trip) {
+        onCreated(submitResult.trip);
+        void queryClient.invalidateQueries({ queryKey: ["trips"] });
+        return;
       }
-    })();
-  }
 
-  if (prevTxStatus === "error" && step === "tx") {
-    setStep("error");
-    setErrorMsg(txState.errorMessage ?? "트랜잭션이 실패했습니다.");
-  }
+      // 4. 아직 미확인 → polling 시작
+      setStep("polling");
+    } catch (e) {
+      setStep("error");
+      setErrorMsg(parseError(e));
+    }
+  }, [
+    tripName, budgetInput, participants, connectedAddress,
+    isWrongChain, sendTransactionAsync, queryClient, onCreated,
+  ]);
 
-  // ── 렌더 ─────────────────────────────────────────────────────────────────
+  // ─── 렌더 ──────────────────────────────────────────────────────────────────
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md">
-        {/* 헤더 */}
-        <div className="flex items-center justify-between px-6 pt-5 pb-3 border-b border-stone-100">
-          <h2 className="text-base font-bold text-stone-800">여행방 만들기</h2>
-          {step === "form" && (
-            <button onClick={onClose} className="text-stone-400 hover:text-stone-600 text-xl leading-none">×</button>
+  if (step === "preparing" || step === "awaiting_wallet" || step === "polling") {
+    const messages: Record<typeof step, string> = {
+      preparing: "서버에서 트랜잭션을 준비하는 중...",
+      awaiting_wallet: "지갑에서 승인 대기 중...",
+      polling: "블록체인에서 확인 중... (최대 1~2분 소요)",
+    };
+    return (
+      <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-8 flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm text-stone-600 text-center">{messages[step]}</p>
+          {step === "polling" && (
+            <p className="text-xs text-stone-400 text-center">
+              트랜잭션이 제출됐습니다. 네트워크 상황에 따라 시간이 걸릴 수 있습니다.
+            </p>
           )}
         </div>
+      </div>
+    );
+  }
 
-        <div className="px-6 py-5 space-y-5">
-          {/* ── 입력 폼 ── */}
-          {step === "form" && (
-            <>
-              {/* 체인 경고 */}
-              {isWrongChain && (
-                <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
-                  ⚠️ 지갑을 <strong>Arc Testnet (Chain ID: 5042002)</strong>으로 전환한 뒤 생성하세요.
-                  <br/>
-                  <span className="text-xs text-amber-600">현재: Chain ID {chainId}</span>
-                </div>
-              )}
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        {/* 헤더 */}
+        <div className="flex items-center justify-between p-6 border-b border-stone-100">
+          <h2 className="text-lg font-semibold text-stone-800">여행방 추가</h2>
+          <button onClick={onClose} className="text-stone-400 hover:text-stone-600 text-xl leading-none">×</button>
+        </div>
 
-              {/* 여행방 이름 */}
-              <div>
-                <label className="block text-sm font-semibold text-stone-700 mb-1">
-                  여행방 이름 <span className="text-red-400">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="예: 도쿄 여행 2027"
-                  className="w-full border border-stone-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                />
-              </div>
-
-              {/* 목표 예산 */}
-              <div>
-                <label className="block text-sm font-semibold text-stone-700 mb-1">
-                  목표 예산 (USDC)
-                </label>
-                <input
-                  type="number"
-                  value={targetBudget}
-                  onChange={(e) => setTargetBudget(e.target.value)}
-                  placeholder="비워두면 제한 없음"
-                  min="0"
-                  step="any"
-                  className="w-full border border-stone-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                />
-              </div>
-
-              {/* 참여자 */}
-              <div>
-                <label className="block text-sm font-semibold text-stone-700 mb-2">
-                  참여자 <span className="text-red-400">*</span>
-                </label>
-                <div className="space-y-2">
-                  {participants.map((p, i) => (
-                    <div key={i} className="flex gap-2 items-center">
-                      <input
-                        type="text"
-                        value={p.displayName}
-                        onChange={(e) => updateParticipant(i, "displayName", e.target.value)}
-                        placeholder="이름"
-                        className="w-24 border border-stone-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                      />
-                      <input
-                        type="text"
-                        value={p.address}
-                        onChange={(e) => updateParticipant(i, "address", e.target.value)}
-                        placeholder="0x 지갑 주소"
-                        className="flex-1 border border-stone-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                      />
-                      {participants.length > 1 && (
-                        <button
-                          onClick={() => removeParticipant(i)}
-                          className="text-stone-400 hover:text-red-500 text-lg leading-none px-1"
-                        >×</button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <button
-                  onClick={addParticipant}
-                  className="mt-2 text-sm text-indigo-600 hover:text-indigo-800"
-                >
-                  + 참여자 추가
-                </button>
-              </div>
-
-              {errorMsg && (
-                <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">{errorMsg}</p>
-              )}
-
-              {/* 안내 */}
-              <div className="text-xs text-stone-500 bg-stone-50 rounded-xl px-4 py-3 space-y-1">
-                <p className="font-semibold text-stone-600">💡 진행 순서</p>
-                <p>1. "생성하기"를 누르면 지갑에서 서명 요청이 뜹니다.</p>
-                <p>2. Arc Testnet 온체인 트랜잭션이 완료되면 자동으로 서버에 등록됩니다.</p>
-              </div>
-
-              {/* 버튼 */}
-              <div className="flex gap-3 pt-1">
-                <button
-                  onClick={onClose}
-                  className="flex-1 py-2.5 rounded-xl border border-stone-300 text-stone-600 text-sm hover:bg-stone-50"
-                >
-                  취소
-                </button>
-                <button
-                  onClick={handleCreate}
-                  disabled={isWrongChain || !name.trim() || validParticipants.length === 0}
-                  className="flex-1 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  생성하기
-                </button>
-              </div>
-            </>
+        <div className="p-6 space-y-5">
+          {/* 체인 경고 */}
+          {isWrongChain && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
+              지갑을 Arc Testnet(Chain ID: 5042002)으로 전환하세요. 현재: {chainId}
+            </div>
           )}
 
-          {/* ── 트랜잭션 진행 중 ── */}
-          {step === "tx" && (
-            <div className="py-6 text-center space-y-4">
-              {txState.status === "waiting_approval" && (
-                <>
-                  <div className="text-3xl">📱</div>
-                  <p className="font-semibold text-stone-700">지갑 서명을 확인하세요</p>
-                  <p className="text-sm text-stone-500">지갑 앱에서 트랜잭션 승인을 눌러주세요.</p>
-                </>
-              )}
-              {txState.status === "pending" && (
-                <>
-                  <div className="text-3xl animate-spin inline-block">⏳</div>
-                  <p className="font-semibold text-stone-700">블록 확인 중...</p>
-                  <p className="text-sm text-stone-500">Arc Testnet에서 트랜잭션을 처리하고 있습니다.</p>
-                  {txState.txHash && (
-                    <p className="text-xs text-stone-400 font-mono break-all">{txState.txHash.slice(0, 20)}…</p>
+          {/* 에러 */}
+          {step === "error" && errorMsg && (
+            <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 text-sm text-rose-700">
+              {errorMsg}
+            </div>
+          )}
+
+          {/* 여행방 이름 */}
+          <div>
+            <label className="block text-sm font-medium text-stone-700 mb-1.5">
+              여행방 이름 <span className="text-rose-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={tripName}
+              onChange={(e) => setTripName(e.target.value)}
+              placeholder="예: 도쿄 여행 2025"
+              className="w-full px-4 py-2.5 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            />
+          </div>
+
+          {/* 목표 예산 */}
+          <div>
+            <label className="block text-sm font-medium text-stone-700 mb-1.5">
+              목표 예산 (USDC) — 비워두면 제한 없음
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={budgetInput}
+              onChange={(e) => setBudgetInput(e.target.value)}
+              placeholder="예: 500"
+              className="w-full px-4 py-2.5 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+            />
+          </div>
+
+          {/* 참여자 */}
+          <div>
+            <label className="block text-sm font-medium text-stone-700 mb-2">
+              참여자 <span className="text-rose-500">*</span>
+            </label>
+            <div className="space-y-2">
+              {participants.map((p, i) => (
+                <div key={i} className="flex gap-2 items-center">
+                  <input
+                    type="text"
+                    value={p.name}
+                    onChange={(e) => updateParticipant(i, "name", e.target.value)}
+                    placeholder="이름"
+                    className="w-24 px-3 py-2 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                  />
+                  <input
+                    type="text"
+                    value={p.address}
+                    onChange={(e) => updateParticipant(i, "address", e.target.value)}
+                    placeholder="0x 지갑 주소"
+                    readOnly={i === 0}
+                    className={`flex-1 px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400 ${
+                      i === 0 ? "bg-stone-50 text-stone-500 border-stone-100 cursor-not-allowed" : "border-stone-200"
+                    }`}
+                  />
+                  {i > 0 && (
+                    <button
+                      onClick={() => removeParticipant(i)}
+                      className="text-stone-400 hover:text-rose-500 text-lg leading-none px-1"
+                    >×</button>
                   )}
-                </>
-              )}
+                </div>
+              ))}
             </div>
-          )}
+            <button
+              onClick={addParticipant}
+              className="mt-2 text-sm text-indigo-600 hover:text-indigo-800"
+            >
+              + 참여자 추가
+            </button>
+          </div>
+        </div>
 
-          {/* ── 서버 등록 중 ── */}
-          {step === "registering" && (
-            <div className="py-6 text-center space-y-4">
-              <div className="text-3xl">🔗</div>
-              <p className="font-semibold text-stone-700">서버에 등록 중...</p>
-              <p className="text-sm text-stone-500">온체인 트랜잭션을 검증하고 여행방을 등록합니다.</p>
-            </div>
-          )}
-
-          {/* ── 완료 ── */}
-          {step === "done" && (
-            <div className="py-6 text-center space-y-4">
-              <div className="text-4xl">🎉</div>
-              <p className="font-bold text-stone-800">여행방이 생성됐습니다!</p>
-              <p className="text-sm text-stone-500">여행방 화면으로 이동합니다.</p>
-            </div>
-          )}
-
-          {/* ── 오류 ── */}
-          {step === "error" && (
-            <div className="py-4 space-y-4">
-              <p className="text-sm text-red-600 bg-red-50 rounded-lg px-4 py-3">{errorMsg}</p>
-              <div className="flex gap-3">
-                <button
-                  onClick={onClose}
-                  className="flex-1 py-2.5 rounded-xl border border-stone-300 text-stone-600 text-sm"
-                >
-                  닫기
-                </button>
-                <button
-                  onClick={() => { setStep("form"); setErrorMsg(null); }}
-                  className="flex-1 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700"
-                >
-                  다시 시도
-                </button>
-              </div>
-            </div>
-          )}
+        {/* 하단 버튼 */}
+        <div className="flex gap-3 p-6 pt-0">
+          <button
+            onClick={onClose}
+            className="flex-1 py-3 rounded-xl border border-stone-200 text-stone-700 text-sm font-medium hover:bg-stone-50"
+          >
+            취소
+          </button>
+          <button
+            onClick={() => void handleCreate()}
+            disabled={isWrongChain || !tripName.trim()}
+            className="flex-1 py-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            생성하기
+          </button>
         </div>
       </div>
     </div>

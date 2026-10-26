@@ -106,14 +106,11 @@ export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
         //   → apiFetch에서 이미 clearToken 완료 → markExpired로 재인증 요청
         // "서버 게이트웨이 오류" (비-JSON 502 등) → 네트워크 문제 → 에러 표시만
         const isGatewayErr = e.message.includes("게이트웨이");
-        const isMissingHeader = e.message.includes("인증이 필요합니다");
-        if (isGatewayErr || isMissingHeader) {
-          setError(isMissingHeader
-            ? "인증 헤더가 전달되지 않았습니다. 로그인을 다시 시도해주세요."
-            : `네트워크 오류: ${e.message}`
-          );
+        if (isGatewayErr) {
+          setError(`네트워크 오류: ${e.message}`);
         } else {
-          // 토큰 불량/만료 → 재인증 필요 (apiFetch에서 이미 clearToken 완료)
+          // "인증이 필요합니다" (헤더 미도달) 포함 모든 401 → 재인증 필요
+          // 게이트웨이가 Bearer 헤더를 제거한 경우도 토큰을 삭제하고 재로그인 유도
           onAuthExpired?.();
         }
       } else {

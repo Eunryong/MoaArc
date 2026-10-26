@@ -1,10 +1,13 @@
 /**
  * JWT 인증 미들웨어 + 여행방 참여자/관리자 권한 검증
  *
- * 지갑 주소만 헤더에 넣는 것을 인증으로 인정하지 않습니다.
- * 서버는 온체인 참여자 정보를 DB에서 확인합니다.
+ * 인증 경로: Authorization: Bearer <token> 헤더만 허용합니다.
+ * X-Auth-Token, Cookie, URL 쿼리 파라미터(_t) 경로는 제거됐습니다.
+ * Arc Studio 게이트웨이가 Authorization 헤더를 제거하면 401로 실패합니다.
+ * 이것은 보안 차단이며, URL/쿠키/커스텀 헤더 우회 경로는 추가하지 않습니다.
  */
 
+import { randomUUID } from "node:crypto";
 import type { Context, Next } from "hono";
 import { verifyToken } from "../lib/auth.js";
 import { prisma } from "../lib/prisma.js";
@@ -21,32 +24,13 @@ declare module "hono" {
 // ─── Bearer 토큰 검증 ────────────────────────────────────────────────────────
 
 export async function requireAuth(c: Context, next: Next) {
-  // 토큰 추출 우선순위:
-  // 1) Authorization: Bearer <token>  — 표준 헤더 (Arc Studio 게이트웨이가 제거함, 확인됨)
-  // 2) X-Auth-Token: <token>          — 커스텀 헤더 (게이트웨이가 제거함, 확인됨)
-  // 3) Cookie: moaarc_token=<token>   — 쿠키 (게이트웨이가 쿠키를 드롭하지 않는다고 확인됨)
-  // traces 2026-10-18 실측: Authorization과 X-Auth-Token 모두 게이트웨이에서 제거됨.
   const authHeader = c.req.header("Authorization") ?? "";
-  const xAuthToken = c.req.header("X-Auth-Token") ?? "";
-  const cookieHeader = c.req.header("Cookie") ?? "";
-  const cookieToken = cookieHeader
-    .split(";")
-    .map((s) => s.trim())
-    .find((s) => s.startsWith("moaarc_token="))
-    ?.slice("moaarc_token=".length) ?? "";
-  // 4) URL 쿼리 파라미터 _t=<token>
-  //    Arc Studio 게이트웨이가 헤더와 쿠키를 모두 제거함 (실측 확인).
-  //    쿼리 파라미터는 URL의 일부이므로 게이트웨이가 제거하지 않음.
-  //    보안 주의: URL 로그에 토큰이 노출될 수 있으므로 개발/스튜디오 환경에서만 사용.
-  const queryToken = c.req.query("_t") ?? "";
+  const hasBearerHeader = authHeader.startsWith("Bearer ");
+  const rawToken = hasBearerHeader ? authHeader.slice(7) : null;
 
-  const rawToken = authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : xAuthToken || cookieToken || queryToken || null;
-
-  // 진단 로그: request id + 토큰 소스 존재 여부(boolean)만 기록, 값 미포함
-  const reqId = c.req.header("x-request-id") ?? Math.random().toString(36).slice(2, 8);
-  console.log(`[auth] reqId=${reqId} hasBearerHeader=${authHeader.startsWith("Bearer ")} hasXAuthToken=${!!xAuthToken} hasCookie=${!!cookieToken} hasQueryToken=${!!queryToken} hasToken=${!!rawToken}`);
+  // 진단 로그: 서버 생성 ID만 사용, 클라이언트 헤더 값 미기록, 토큰값 미포함
+  const reqId = randomUUID();
+  console.log(`[auth] reqId=${reqId} hasBearerHeader=${hasBearerHeader} hasToken=${!!rawToken}`);
 
   if (!rawToken) {
     return c.json({ error: "인증이 필요합니다." }, 401);

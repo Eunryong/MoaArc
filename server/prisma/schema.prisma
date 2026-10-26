@@ -162,6 +162,37 @@ model ExpenseApproval {
   @@unique([versionId, address])
 }
 
+// ─── TripCreationIntent ──────────────────────────────────────────────────────
+// 여행방 생성 의도 — 프론트가 트랜잭션을 전송하기 전 백엔드가 발급합니다.
+// txHash 제출 후 백엔드가 RPC에서 영수증을 조회해 상태를 갱신합니다.
+model TripCreationIntent {
+  id              String   @id @default(cuid())
+  // 인증된 세션에서 가져온 생성자 지갑 주소
+  creatorAddress  String
+  // intent 생성 시 기대값 (검증용)
+  chainId         Int
+  contractAddress String
+  tripName        String
+  participantAddresses String  // JSON: string[]
+  targetBudget    String  // BigInt을 문자열로 저장 (SQLite BigInt 미지원)
+  // 프론트에서 제출한 calldata (백엔드가 인코딩)
+  calldata        String
+  // 상태: pending_tx | submitted | confirmed | failed | reverted
+  status          String   @default("pending_tx")
+  // 트랜잭션 해시 — 프론트 제출 후 채워짐
+  txHash          String?  @unique
+  // 온체인 여행방 ID — confirmed 후 채워짐
+  onchainTripId   String?
+  // 에러 메시지
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([creatorAddress])
+  @@index([txHash])
+  @@index([status])
+}
+
 // ─── AgentConversation ───────────────────────────────────────────────────────
 // Gemini 에이전트 대화 — TESTNET 모드 전용
 model AgentConversation {

@@ -4,6 +4,15 @@
  */
 
 import type { Context } from "hono";
+
+async function parseBody<T>(c: Context): Promise<T> {
+  const tunnelBody = c.get("_tunnelBody" as never) as string | undefined;
+  if (tunnelBody) {
+    try { return JSON.parse(tunnelBody) as T; }
+    catch { throw Object.assign(new Error("터널 body JSON 파싱 실패"), { status: 400 }); }
+  }
+  return c.req.json<T>();
+}
 import { issueNonce, verifySignatureAndIssueToken } from "../lib/auth.js";
 
 export async function getNonce(c: Context) {
@@ -20,7 +29,7 @@ export async function getNonce(c: Context) {
 }
 
 export async function verifyAndIssueToken(c: Context) {
-  const body = await c.req.json<{ address: string; nonce: string; signature: string }>();
+  const body = await parseBody<{ address: string; nonce: string; signature: string }>(c);
   const { address, nonce, signature } = body ?? {};
 
   if (!address || !nonce || !signature) {

@@ -19,6 +19,10 @@ function resolvedDatasourceUrl(): string | undefined {
   return url;
 }
 
+// DB 경로 진단 (경로만 출력, 값 없음)
+const resolvedUrl = resolvedDatasourceUrl() ?? `file:${DEV_DB_PATH}`;
+console.log(`[prisma] DB URL path: ${resolvedUrl.replace(/file:/, "").split("?")[0]}`);
+
 // 개발 환경에서 HMR 재시작마다 새 PrismaClient 생성을 방지
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
@@ -27,7 +31,7 @@ export const prisma =
   new PrismaClient({
     log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
     datasources: {
-      db: { url: resolvedDatasourceUrl() ?? `file:${DEV_DB_PATH}` },
+      db: { url: resolvedUrl },
     },
   });
 

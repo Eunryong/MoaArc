@@ -7,6 +7,55 @@ import type { Context } from "hono";
 import { verifyCreateTripTx, fetchOnchainParticipants, ARC_TESTNET_CHAIN_ID } from "../lib/chain.js";
 import * as repo from "../repositories/trip.repository.js";
 
+// ─── 입력 검증 상수 ───────────────────────────────────────────────────────────
+
+const ADDR_RE = /^0x[0-9a-fA-F]{40}$/i;
+const TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^\d{2}:\d{2}$/;
+
+export const EXPENSE_CATEGORY = new Set(["식비", "숙박", "교통", "기타", "관광", "쇼핑", "통신"]);
+export const PAYMENT_FLOW = new Set(["community_release", "personal_prepaid"]);
+export const ITINERARY_STATUS = new Set(["draft", "confirmed", "cancelled"]);
+export const CONFIDENCE = new Set(["high", "medium", "low", "none"]);
+export const APPROVAL_ACTION = new Set(["승인", "수정요청"]);
+
+export const MAX_NAME = 200;
+export const MAX_TEXT = 2000;
+export const MAX_URL = 1000;
+const MAX_PARTICIPANTS = 50;
+
+export function assertAddr(val: unknown, field: string): string {
+  if (typeof val !== "string" || !ADDR_RE.test(val))
+    throw new RangeError(`${field}은 유효한 0x 주소여야 합니다.`);
+  return val.toLowerCase();
+}
+
+export function assertStr(val: unknown, field: string, max = MAX_NAME): string {
+  if (typeof val !== "string" || val.trim().length === 0)
+    throw new RangeError(`${field}은 비어 있을 수 없습니다.`);
+  if (val.length > max)
+    throw new RangeError(`${field}은 최대 ${max}자입니다.`);
+  return val.trim();
+}
+
+export function assertEnum(val: unknown, allowed: Set<string>, field: string): string {
+  if (typeof val !== "string" || !allowed.has(val))
+    throw new RangeError(`${field}은 다음 중 하나여야 합니다: ${[...allowed].join(", ")}`);
+  return val;
+}
+
+function assertDate(val: unknown, field: string): string {
+  if (typeof val !== "string" || !DATE_RE.test(val))
+    throw new RangeError(`${field}은 YYYY-MM-DD 형식이어야 합니다.`);
+  return val;
+}
+
+function assertBigIntStr(val: unknown, field: string): bigint {
+  try { const n = BigInt(val as string); if (n < 0n) throw new Error(); return n; }
+  catch { throw new RangeError(`${field}은 0 이상의 정수 문자열이어야 합니다.`); }
+}
+
 // ─── 여행방 목록 ──────────────────────────────────────────────────────────────
 
 export async function listTrips(c: Context) {
@@ -113,21 +162,26 @@ export async function addItineraryItem(c: Context) {
     activity: string; participants?: string[]; notes?: string;
   }>();
 
-  if (!body.date || !body.location || !body.activity) {
-    return c.json({ error: "date, location, activity 필드가 필요합니다." }, 400);
-  }
+  try {
+    const date = assertDate(body.date, "date");
+    if (body.time && !TIME_RE.test(body.time))
+      throw new RangeError("time은 HH:MM 형식이어야 합니다.");
+    const location = assertStr(body.location, "location", MAX_TEXT);
+    const activity = assertStr(body.activity, "activity", MAX_TEXT);
+    const participants = (body.participants ?? []).map((a) => assertAddr(a, "participants[]"));
+    if (participants.length > MAX_PARTICIPANTS)
+      throw new RangeError(`participants는 최대 ${MAX_PARTICIPANTS}명입니다.`);
+    const notes = body.notes ? assertStr(body.notes, "notes", MAX_TEXT) : undefined;
 
-  const item = await repo.createItineraryItem({
-    tripId: trip.id,
-    date: body.date,
-    time: body.time,
-    location: body.location,
-    activity: body.activity,
-    participants: body.participants,
-    notes: body.notes,
-    createdBy: caller,
-  });
-  return c.json({ item }, 201);
+    const item = await repo.createItineraryItem({
+      tripId: trip.id, date, time: body.time, location, activity,
+      participants, notes, createdBy: caller,
+    });
+    return c.json({ item }, 201);
+  } catch (e) {
+    if (e instanceof RangeError) return c.json({ error: e.message }, 400);
+    throw e;
+  }
 }
 
 export async function patchItineraryItem(c: Context) {
@@ -144,18 +198,23 @@ export async function patchItineraryItem(c: Context) {
   if (!existing) return c.json({ error: "일정을 찾을 수 없습니다." }, 404);
 
   const patch: Record<string, unknown> = {};
-  if (body.date)                patch.date = body.date;
-  if (body.time !== undefined)  patch.time = body.time;
-  if (body.location)            patch.location = body.location;
-  if (body.activity)            patch.activity = body.activity;
-  if (body.participants)        patch.participants = JSON.stringify(body.participants);
-  if (body.notes !== undefined) patch.notes = body.notes;
-  if (body.status)              patch.status = body.status;
-  if (body.estMinUsdc)          patch.estMinUsdc = BigInt(body.estMinUsdc);
-  if (body.estMaxUsdc)          patch.estMaxUsdc = BigInt(body.estMaxUsdc);
-  if (body.estCurrency)         patch.estCurrency = body.estCurrency;
-  if (body.estSource)         { patch.estSource = body.estSource; patch.estAt = new Date(); }
-  if (body.confidence)          patch.confidence = body.confidence;
+  try {
+    if (body.date)                patch.date = assertDate(body.date, "date");
+    if (body.time !== undefined)  { if (body.time && !TIME_RE.test(body.time)) throw new RangeError("time은 HH:MM 형식"); patch.time = body.time; }
+    if (body.location)            patch.location = assertStr(body.location, "location", MAX_TEXT);
+    if (body.activity)            patch.activity = assertStr(body.activity, "activity", MAX_TEXT);
+    if (body.participants)        patch.participants = JSON.stringify(body.participants.map((a) => assertAddr(a, "participants[]")));
+    if (body.notes !== undefined) patch.notes = body.notes ? assertStr(body.notes, "notes", MAX_TEXT) : null;
+    if (body.status)              patch.status = assertEnum(body.status, ITINERARY_STATUS, "status");
+    if (body.estMinUsdc)          patch.estMinUsdc = assertBigIntStr(body.estMinUsdc, "estMinUsdc");
+    if (body.estMaxUsdc)          patch.estMaxUsdc = assertBigIntStr(body.estMaxUsdc, "estMaxUsdc");
+    if (body.estCurrency)         patch.estCurrency = assertStr(body.estCurrency, "estCurrency", 10);
+    if (body.estSource)         { patch.estSource = assertStr(body.estSource, "estSource", MAX_URL); patch.estAt = new Date(); }
+    if (body.confidence)          patch.confidence = assertEnum(body.confidence, CONFIDENCE, "confidence");
+  } catch (e) {
+    if (e instanceof RangeError) return c.json({ error: e.message }, 400);
+    throw e;
+  }
 
   const updated = await repo.updateItineraryItem(itemId, patch as Parameters<typeof repo.updateItineraryItem>[1]);
   return c.json({ item: updated });
@@ -183,7 +242,22 @@ export async function addExpense(c: Context) {
     return c.json({ error: "title, category, date, totalUsdc, paymentFlow 필드가 필요합니다." }, 400);
   }
 
-  const total = BigInt(body.totalUsdc);
+  try {
+    assertStr(body.title, "title", MAX_NAME);
+    assertEnum(body.category, EXPENSE_CATEGORY, "category");
+    assertDate(body.date, "date");
+    assertEnum(body.paymentFlow, PAYMENT_FLOW, "paymentFlow");
+    if (body.receiptNote) assertStr(body.receiptNote, "receiptNote", MAX_TEXT);
+    (body.shares ?? []).forEach((s, i) => {
+      assertAddr(s.address, `shares[${i}].address`);
+      assertBigIntStr(s.amountUsdc, `shares[${i}].amountUsdc`);
+    });
+  } catch (e) {
+    if (e instanceof RangeError) return c.json({ error: e.message }, 400);
+    throw e;
+  }
+
+  const total = assertBigIntStr(body.totalUsdc, "totalUsdc");
   const sharesSum = (body.shares ?? []).reduce((s, sh) => s + BigInt(sh.amountUsdc), 0n);
   if (sharesSum !== total) {
     return c.json({ error: `분담 합계(${sharesSum})가 지출 총액(${total})과 일치하지 않습니다.` }, 400);
@@ -216,7 +290,7 @@ export async function approveExpense(c: Context) {
     newShares?: { address: string; amountUsdc: string }[];
   }>();
 
-  if (!["승인", "수정요청"].includes(body.action)) {
+  if (!APPROVAL_ACTION.has(body.action)) {
     return c.json({ error: "action은 '승인' 또는 '수정요청' 이어야 합니다." }, 400);
   }
 

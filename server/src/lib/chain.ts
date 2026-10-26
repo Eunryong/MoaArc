@@ -16,7 +16,7 @@
  *   ARC_TESTNET_RPC_FALLBACK 프록시 미사용 시 fallback RPC (공개 엔드포인트)
  */
 
-import { createPublicClient, http, parseAbiItem, parseAbi } from "viem";
+import { createPublicClient, http, parseAbiItem, parseAbi, encodeFunctionData, decodeEventLog } from "viem";
 import { arcTestnet } from "viem/chains";
 
 // Arc Testnet chainId (viem/chains arcTestnet.id = 5042002)
@@ -29,19 +29,73 @@ function getMoarcContract(): `0x${string}` {
 }
 
 function getRpcUrl(): string {
+  // 공개 RPC를 우선 사용 — 프록시는 빈 응답을 반환하는 경우가 있어 fallback 역할로만 사용
+  const fallback = process.env.ARC_TESTNET_RPC_FALLBACK;
+  if (fallback) return fallback;
   const base = process.env.RPC_PROXY_BASE_URL;
   const token = process.env.RPC_PROXY_TOKEN;
   const chains = process.env.RPC_PROXY_CHAINS ?? "";
   if (base && token && chains.includes("ARC-TESTNET")) {
     return `${base}/api/rpc/arc-testnet?_rpc_token=${token}`;
   }
-  const fallback = process.env.ARC_TESTNET_RPC_FALLBACK;
-  if (!fallback) {
-    throw new Error(
-      "RPC URL을 결정할 수 없습니다. RPC_PROXY_BASE_URL/TOKEN/CHAINS 또는 ARC_TESTNET_RPC_FALLBACK 환경변수를 설정하세요."
-    );
+  throw new Error(
+    "RPC URL을 결정할 수 없습니다. ARC_TESTNET_RPC_FALLBACK 또는 RPC_PROXY_BASE_URL/TOKEN/CHAINS 환경변수를 설정하세요."
+  );
+}
+
+// createTrip 함수 ABI — calldata 인코딩용
+const CREATE_TRIP_ABI = parseAbi([
+  "function createTrip(string name, address[] participants, uint256 targetBudget) returns (uint256 tripId)",
+]);
+
+/**
+ * createTrip calldata를 인코딩합니다. 지갑 서명 없이 서버에서 안전하게 생성합니다.
+ */
+export function encodeCreateTripCalldata(
+  name: string,
+  participants: `0x${string}`[],
+  targetBudget: bigint
+): `0x${string}` {
+  return encodeFunctionData({
+    abi: CREATE_TRIP_ABI,
+    functionName: "createTrip",
+    args: [name, participants, targetBudget],
+  });
+}
+
+/**
+ * 트랜잭션이 Arc RPC에서 보이는지 확인합니다 (confirmed = blockNumber가 있음).
+ * 아직 pending이면 null을 반환합니다 (실패로 단정하지 않음).
+ */
+export async function getTransactionStatus(txHash: `0x${string}`): Promise<
+  | { found: false }
+  | { found: true; confirmed: false }
+  | { found: true; confirmed: true; success: boolean; blockNumber: bigint }
+> {
+  const client = createPublicClient({ chain: arcTestnet, transport: http(getRpcUrl()) });
+
+  // eth_getTransactionByHash: 없으면 null
+  let tx: Awaited<ReturnType<typeof client.getTransaction>> | null = null;
+  try {
+    tx = await client.getTransaction({ hash: txHash });
+  } catch {
+    return { found: false };
   }
-  return fallback;
+  if (!tx) return { found: false };
+  if (tx.blockNumber === null) return { found: true, confirmed: false };
+
+  // 영수증 조회
+  try {
+    const receipt = await client.getTransactionReceipt({ hash: txHash });
+    return {
+      found: true,
+      confirmed: true,
+      success: receipt.status === "success",
+      blockNumber: receipt.blockNumber,
+    };
+  } catch {
+    return { found: true, confirmed: false };
+  }
 }
 
 const TRIP_CREATED_ABI = parseAbiItem(
@@ -95,7 +149,7 @@ export async function verifyCreateTripTx(
     if (log.address.toLowerCase() !== contract) continue;
     if (log.topics[0]?.toLowerCase() !== TRIP_CREATED_TOPIC) continue;
     try {
-      const decoded = client.decodeEventLog({
+      const decoded = decodeEventLog({
         abi: [TRIP_CREATED_ABI],
         data: log.data,
         topics: log.topics as [`0x${string}`, ...`0x${string}`[]],

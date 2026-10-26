@@ -51,21 +51,36 @@ export async function verifySignatureAndIssueToken(
 ): Promise<string> {
   const norm = address.toLowerCase() as `0x${string}`;
 
-  // DB에서 nonce 조회
+  // 1. nonce 존재·주소 일치·만료 여부 사전 확인 (조회 전용, 아직 소비 안 함)
   const record = await prisma.authNonce.findUnique({ where: { nonce } });
   if (!record) throw new Error("nonce를 찾을 수 없습니다.");
   if (record.used) throw new Error("이미 사용된 nonce입니다.");
   if (record.address !== norm) throw new Error("주소가 nonce와 일치하지 않습니다.");
   if (record.expiresAt < new Date()) throw new Error("nonce가 만료되었습니다.");
 
-  // 서명 검증
+  // 2. 서명 검증 — 실패 시 여기서 throw, nonce는 소비되지 않음
   const valid = await verifyMessage({ address: norm, message: nonce, signature });
   if (!valid) throw new Error("서명 검증 실패");
 
-  // nonce 소비
-  await prisma.authNonce.update({ where: { nonce }, data: { used: true } });
+  // 3. 원자적 nonce 소비:
+  //    used=false AND address 일치 AND expiresAt > now 조건을 만족하는 행만 업데이트.
+  //    경합(race condition)으로 다른 요청이 먼저 소비했으면 count=0 → 인증 실패.
+  const { count } = await prisma.authNonce.updateMany({
+    where: {
+      nonce,
+      address: norm,
+      used: false,
+      expiresAt: { gt: new Date() },
+    },
+    data: { used: true },
+  });
 
-  // JWT 발급 (지갑 주소만 클레임)
+  if (count !== 1) {
+    // 0이면 이미 소비됐거나 만료, 1보다 크면 데이터 이상 (nonce unique 보장으로 발생 불가)
+    throw new Error("nonce 소비 실패: 이미 사용됐거나 만료되었습니다.");
+  }
+
+  // 4. JWT 발급 (지갑 주소만 클레임, 민감값 로그 없음)
   const token = await new SignJWT({ sub: norm })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
