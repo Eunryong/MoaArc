@@ -229,6 +229,8 @@ export default function App() {
       const signature = await signMessageAsync({ message: nonce });
       // verifySignature가 saveToken()을 호출해 sessionStorage에 토큰 저장 후 토큰을 반환
       const newToken = await verifySignature(address, nonce, signature);
+      // 진단: verify 성공 직후 localStorage 토큰 존재 여부만 기록 (값 미기록)
+      console.log("[auth] verify success tokenSavedToStorage=" + (!!newToken && !!localStorage.getItem("moaarc_auth_token")));
       // refreshAuth: React state 업데이트 (비동기 — 이 줄 이후 isAuthenticated는 아직 false일 수 있음)
       refreshAuth();
       // 발급된 토큰을 reloadTrips에 직접 전달 — sessionStorage/state 타이밍 의존성 완전 제거
@@ -340,8 +342,21 @@ export default function App() {
 
           {/* 오류 메시지 — 잘못된 체인에서는 숨김, tripsError는 인증됐을 때만 표시 */}
           {!isWrongChain && (authError || (isAuthenticated && tripsError)) && (
-            <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
-              {authError || tripsError}
+            <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700 flex items-center justify-between gap-2">
+              <span>{authError || tripsError}</span>
+              <button
+                onClick={() => {
+                  clearToken();
+                  refreshAuth();
+                  clearTripsError();
+                  setAuthError(null);
+                  void handleWalletLogin();
+                }}
+                disabled={authLoading}
+                className="shrink-0 px-2 py-1 rounded-full bg-rose-600 text-white font-semibold hover:bg-rose-700 disabled:opacity-50"
+              >
+                세션 초기화 후 다시 로그인
+              </button>
             </div>
           )}
 

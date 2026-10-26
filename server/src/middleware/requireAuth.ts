@@ -25,12 +25,21 @@ declare module "hono" {
 
 export async function requireAuth(c: Context, next: Next) {
   const authHeader = c.req.header("Authorization") ?? "";
-  const hasBearerHeader = authHeader.startsWith("Bearer ");
-  const rawToken = hasBearerHeader ? authHeader.slice(7) : null;
+  const hasAuthorizationHeader = authHeader.length > 0;
+  const hasBearerScheme = authHeader.startsWith("Bearer ");
+  const rawToken = hasBearerScheme ? authHeader.slice(7) : null;
 
-  // 진단 로그: 서버 생성 ID만 사용, 클라이언트 헤더 값 미기록, 토큰값 미포함
+  // 진단 로그: 서버 생성 ID만 사용, 헤더 값·토큰값 미기록
+  // hasAuthorizationHeader: Authorization 헤더 자체의 도착 여부
+  // hasBearerScheme: "Bearer " 스킴 여부 (헤더가 있지만 스킴이 다를 경우 구분)
   const reqId = randomUUID();
-  console.log(`[auth] reqId=${reqId} hasBearerHeader=${hasBearerHeader} hasToken=${!!rawToken}`);
+  console.log(
+    `[auth] reqId=${reqId}` +
+    ` path=${c.req.path}` +
+    ` hasAuthorizationHeader=${hasAuthorizationHeader}` +
+    ` hasBearerScheme=${hasBearerScheme}` +
+    ` hasToken=${!!rawToken}`
+  );
 
   if (!rawToken) {
     return c.json({ error: "인증이 필요합니다." }, 401);

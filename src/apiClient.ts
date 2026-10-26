@@ -97,12 +97,16 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   const body = await res.json() as Record<string, unknown>;
 
   if (res.status === 401) {
-    // 모든 JSON 401 → 토큰 삭제 후 에러 던짐
-    // "인증이 필요합니다." = Bearer 헤더 미도달 (게이트웨이 드롭 포함)
-    // "유효하지 않거나 만료된 토큰" = 헤더 도달했지만 서버 검증 실패
-    // 두 경우 모두 현재 토큰으로는 요청할 수 없으므로 clearToken 처리
     const serverMsg = (body.error as string) ?? "";
-    clearToken();
+    // "인증이 필요합니다." = Authorization 헤더 자체가 서버에 도달하지 않음
+    //   → 게이트웨이 제거 또는 토큰 없이 발사된 경우
+    //   → 토큰은 보존: 헤더를 보냈는데 게이트웨이가 제거한 것일 수 있음
+    // "유효하지 않거나 만료된 토큰" = 헤더 도달했지만 검증 실패
+    //   → clearToken: 이 토큰은 더 이상 사용 불가
+    const isMissingHeader = serverMsg.includes("인증이 필요합니다");
+    if (!isMissingHeader) {
+      clearToken();
+    }
     throw new ApiError(401, serverMsg || "인증이 필요합니다. 다시 로그인해주세요.");
   }
 
