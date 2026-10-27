@@ -1,13 +1,20 @@
 {
-  "contractAddress": "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+  "contractAddress": "0xf7a733fb2084b31591a0fbacded683efbe5b6728",
   "network": "ARC-TESTNET",
   "deployerWalletId": "3c2464b2-8369-52e2-a782-800bbeca5396",
   "contract_code_path": "/home/user/app/contracts/MoaArcTreasury.sol",
   "contract_compiled_code_path": "/home/user/app/contracts/out/MoaArcTreasury.sol/MoaArcTreasury.json",
   "contract_network_and_links": {
-    "Arc Testnet": "https://explorer.testnet.arc.io/address/0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3"
+    "Arc Testnet": "https://explorer.testnet.arc.io/address/0xf7a733fb2084b31591a0fbacded683efbe5b6728"
   },
   "contract_deployments": [
+    {
+      "chain": "Arc Testnet",
+      "address": "0xf7a733fb2084b31591a0fbacded683efbe5b6728",
+      "explorerUrl": "https://explorer.testnet.arc.io/address/0xf7a733fb2084b31591a0fbacded683efbe5b6728",
+      "txHash": "0xaa69a1a89b775873ba20bd60f81b6e99df1ebf55f1119b7fae180d4f304dc0ac",
+      "deployedAt": "2026-10-27T00:26:19.728Z"
+    },
     {
       "chain": "Arc Testnet",
       "address": "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
@@ -66,6 +73,24 @@
         }
       ],
       "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "addParticipant",
+      "inputs": [
+        {
+          "name": "tripId",
+          "type": "uint256",
+          "internalType": "uint256"
+        },
+        {
+          "name": "newParticipant",
+          "type": "address",
+          "internalType": "address"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
     },
     {
       "type": "function",
@@ -1146,6 +1171,25 @@
     },
     {
       "type": "event",
+      "name": "ParticipantAdded",
+      "inputs": [
+        {
+          "name": "tripId",
+          "type": "uint256",
+          "indexed": true,
+          "internalType": "uint256"
+        },
+        {
+          "name": "newParticipant",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
       "name": "PersonalPrepaidRecorded",
       "inputs": [
         {
@@ -1385,6 +1429,17 @@
           "name": "expectedForRefunds",
           "type": "uint256",
           "internalType": "uint256"
+        }
+      ]
+    },
+    {
+      "type": "error",
+      "name": "ContractAddress",
+      "inputs": [
+        {
+          "name": "addr",
+          "type": "address",
+          "internalType": "address"
         }
       ]
     },

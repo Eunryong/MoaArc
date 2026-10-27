@@ -1,5 +1,6 @@
 import type { ParticipantSummary, Participant } from "../types";
 import { fmtUsdc } from "../calculations";
+import { useI18n } from "../i18n";
 
 interface Props {
   participant: Participant;
@@ -7,11 +8,12 @@ interface Props {
 }
 
 export default function TopSummaryBar({ participant, summary }: Props) {
+  const { t } = useI18n();
   const { depositedAmount, confirmedBurden, pendingBurden, netBalance } = summary;
 
   const netSign = netBalance >= 0n ? "+" : "-";
   const netAbs = netBalance < 0n ? -netBalance : netBalance;
-  const netLabel = netBalance >= 0n ? "돌려받을 금액" : "추가 납부 필요";
+  const netLabel = netBalance >= 0n ? t("surplus") : t("deficit");
   const netColor = netBalance >= 0n ? "text-emerald-700" : "text-rose-600";
 
   return (
@@ -19,18 +21,18 @@ export default function TopSummaryBar({ participant, summary }: Props) {
       <div className="max-w-4xl mx-auto">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs text-stone-500 font-medium">
-            기준: <strong className="text-stone-700">{participant.name}</strong>
+            <strong className="text-stone-700">{participant.name}</strong>
           </span>
           {pendingBurden > 0n && (
             <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">
-              승인 대기 지출 있음
+              {t("status_pending_approval")}
             </span>
           )}
         </div>
         <div className="grid grid-cols-3 gap-3">
           {/* 내가 낸 돈 */}
           <div className="bg-stone-50 rounded-lg p-3 border border-stone-200">
-            <p className="text-xs text-stone-500 mb-0.5">내가 낸 돈</p>
+            <p className="text-xs text-stone-500 mb-0.5">{t("actual_deposit")}</p>
             <p className="text-lg font-bold text-stone-800 tabular-nums">
               {fmtUsdc(depositedAmount)} <span className="text-xs font-normal text-stone-500">USDC</span>
             </p>
@@ -38,13 +40,13 @@ export default function TopSummaryBar({ participant, summary }: Props) {
 
           {/* 내가 부담한 돈 */}
           <div className="bg-stone-50 rounded-lg p-3 border border-stone-200">
-            <p className="text-xs text-stone-500 mb-0.5">내가 부담한 돈</p>
+            <p className="text-xs text-stone-500 mb-0.5">{t("my_burden")}</p>
             <p className="text-lg font-bold text-stone-800 tabular-nums">
               {fmtUsdc(confirmedBurden)} <span className="text-xs font-normal text-stone-500">USDC</span>
             </p>
             {pendingBurden > 0n && (
               <p className="text-xs text-amber-600 tabular-nums mt-0.5">
-                + 대기 {fmtUsdc(pendingBurden)} USDC
+                + {t("status_pending_approval")} {fmtUsdc(pendingBurden)} USDC
               </p>
             )}
           </div>

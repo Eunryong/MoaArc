@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useI18n } from "./i18n";
 import { useAccount, useChainId, useSignMessage, useSwitchChain } from "wagmi";
 import { ConnectKitButton } from "connectkit";
 import { arcTestnet } from "viem/chains";
@@ -11,7 +12,9 @@ import {
   useMyTrips,
   useTripItinerary,
   useTripExpenses,
+  useTripNotifications,
 } from "./useServerSync";
+import { markNotificationRead } from "./apiClient";
 import {
   fetchNonce,
   verifySignature,
@@ -29,14 +32,6 @@ import ItineraryTab from "./components/ItineraryTab";
 import { CreateTripModal } from "./components/CreateTripModal";
 
 type Tab = "dashboard" | "my" | "expenses" | "settlement" | "itinerary";
-
-const TAB_LABELS: Record<Tab, string> = {
-  dashboard: "대시보드",
-  my: "내 경비",
-  expenses: "지출 목록",
-  settlement: "최종 정산",
-  itinerary: "일정·에이전트",
-};
 
 // TripApiRecord → Trip 최소 변환 (온체인 잔액은 useContractState에서 별도 읽음)
 function apiRecordToTrip(r: TripApiRecord): Trip {
@@ -68,6 +63,17 @@ function apiRecordToTrip(r: TripApiRecord): Trip {
 }
 
 export default function App() {
+  const { t, lang, setLang } = useI18n();
+
+  // tab labels inside component so t() is available
+  const TAB_LABELS: Record<Tab, string> = {
+    dashboard: t("tab_dashboard"),
+    my: t("tab_my_expenses"),
+    expenses: t("tab_expense_list"),
+    settlement: t("tab_settlement"),
+    itinerary: t("tab_itinerary"),
+  };
+
   // ─── TESTNET 상태 ──────────────────────────────────────────────────────
   const [selectedDbTripId, setSelectedDbTripId] = useState<string | null>(null);
   const [trip, setTrip] = useState<Trip | null>(null);
@@ -103,6 +109,16 @@ export default function App() {
     reload: reloadTrips,
     clearError: clearTripsError,
   } = useMyTrips(serverOnline && isAuthenticated, markExpired);
+
+  // ─── 선택된 여행방 알림 ────────────────────────────────────────────────
+  const {
+    notifications: serverNotifications,
+    unreadCount: notifUnreadCount,
+    reload: reloadNotifications,
+  } = useTripNotifications(
+    selectedDbTripId,
+    serverOnline && isAuthenticated && !!selectedDbTripId
+  );
 
   // ─── 선택된 여행방 일정·지출 ───────────────────────────────────────────
   const {
@@ -302,9 +318,9 @@ export default function App() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("User rejected") || msg.includes("user rejected")) {
-        setAuthError("서명을 취소했습니다.");
+        setAuthError("Signature cancelled.");
       } else {
-        setAuthError(`로그인 실패: ${msg}`);
+        setAuthError(`Sign-in failed: ${msg}`);
       }
     } finally {
       setAuthLoading(false);
@@ -344,18 +360,35 @@ export default function App() {
                   target="_blank" rel="noreferrer"
                   className="text-indigo-500 hover:underline"
                 >
-                  Arc 탐색기 ↗
+                  Arc Explorer ↗
                 </a>
               </p>
             </div>
-            <ConnectKitButton />
+            <div className="flex items-center gap-2">
+              {/* Language toggle */}
+              <div className="flex rounded-full border border-stone-200 overflow-hidden text-xs font-semibold">
+                <button
+                  onClick={() => setLang("en")}
+                  className={`px-2.5 py-1 transition-colors ${lang === "en" ? "bg-indigo-600 text-white" : "bg-white text-stone-500 hover:bg-stone-50"}`}
+                >
+                  {t("lang_en")}
+                </button>
+                <button
+                  onClick={() => setLang("ko")}
+                  className={`px-2.5 py-1 transition-colors ${lang === "ko" ? "bg-indigo-600 text-white" : "bg-white text-stone-500 hover:bg-stone-50"}`}
+                >
+                  {t("lang_ko")}
+                </button>
+              </div>
+              <ConnectKitButton />
+            </div>
           </div>
 
           {/* [STUDIO_TEST_MODE] 인증 우회 배지 */}
           {STUDIO_TEST_MODE && (
             <div className="mb-2 bg-yellow-100 border border-yellow-400 rounded-lg px-3 py-1.5 text-xs font-bold text-yellow-800 flex items-center gap-2">
-              <span>⚠️ TEST MODE: 서버 인증 우회 (Studio 전용)</span>
-              <span className="font-normal text-yellow-700">— 실제 자금·메인넷 사용 금지</span>
+              <span>⚠️ {t("test_mode_badge")}: server auth bypass (Studio only)</span>
+              <span className="font-normal text-yellow-700">— no real funds, no mainnet</span>
             </div>
           )}
 
@@ -363,22 +396,22 @@ export default function App() {
           {isWrongChain && (
             <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
               <div className="flex items-center justify-between gap-2">
-                <span>⚠️ Arc Testnet (Chain ID: 5042002)으로 전환해주세요. 현재: {chainId}</span>
+                <span>⚠️ {t("wrong_chain")} (current: {chainId})</span>
                 <button
                   onClick={() => switchChain({ chainId: arcTestnet.id })}
                   disabled={isSwitchingChain}
                   className="shrink-0 px-2 py-1 rounded-full bg-rose-600 text-white font-semibold hover:bg-rose-700 disabled:opacity-50"
                 >
-                  {isSwitchingChain ? "전환 중…" : "Arc Testnet으로 전환"}
+                  {isSwitchingChain ? t("status_loading") : t("switch_to_arc")}
                 </button>
               </div>
               {switchChainError && (
                 <p className="mt-1 text-rose-600">
                   {switchChainError.message.includes("rejected") || switchChainError.message.includes("denied")
-                    ? "지갑에서 네트워크 전환을 취소했습니다."
+                    ? "Wallet rejected the network switch."
                     : switchChainError.message.includes("Unrecognized chain")
-                      ? "지갑이 Arc Testnet을 인식하지 못했습니다. 지갑에서 직접 Arc Testnet을 추가한 뒤 다시 시도하세요."
-                      : "네트워크 전환 실패. 지갑에서 직접 Arc Testnet으로 전환해주세요."}
+                      ? "Wallet does not recognise Arc Testnet. Add it manually and try again."
+                      : "Network switch failed. Please switch to Arc Testnet manually in your wallet."}
                 </p>
               )}
             </div>
@@ -393,10 +426,10 @@ export default function App() {
             }`}>
               <span className={`text-xs ${isExpired ? "text-amber-700" : "text-indigo-700"}`}>
                 {authLoading
-                  ? "지갑에서 서명 요청을 확인해주세요…"
+                  ? t("signing_in")
                   : isExpired
-                    ? "로그인이 만료됐습니다. 다시 서명해주세요."
-                    : "서버에 로그인하려면 지갑으로 서명하세요."}
+                    ? t("err_401")
+                    : t("sign_in_desc")}
               </span>
               <button
                 onClick={() => { void handleWalletLogin(); }}
@@ -407,7 +440,7 @@ export default function App() {
                     : "bg-indigo-600 hover:bg-indigo-700"
                 }`}
               >
-                {authLoading ? "서명 중…" : isExpired ? "지갑으로 다시 인증" : "지갑 서명으로 로그인"}
+                {authLoading ? t("signing_in") : t("sign_in")}
               </button>
             </div>
           )}
@@ -427,7 +460,7 @@ export default function App() {
                 disabled={authLoading}
                 className="shrink-0 px-2 py-1 rounded-full bg-rose-600 text-white font-semibold hover:bg-rose-700 disabled:opacity-50"
               >
-                세션 초기화 후 다시 로그인
+                {t("session_reset")}
               </button>
             </div>
           )}
@@ -435,58 +468,58 @@ export default function App() {
           {/* 참여자 인식 */}
           {isParticipant && (
             <div className="mb-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 text-xs text-emerald-700">
-              지갑 인식: <strong>{connectedParticipant?.name}</strong> ({address?.slice(0, 6)}…{address?.slice(-4)})
+              Wallet: <strong>{connectedParticipant?.name}</strong> ({address?.slice(0, 6)}…{address?.slice(-4)})
             </div>
           )}
           {isNonParticipant && (
             <div className="mb-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-700">
-              ⚠️ 연결된 지갑이 이 여행방 참여자가 아닙니다. 읽기 전용.
+              ⚠️ This wallet is not a participant in this trip. Read-only.
             </div>
           )}
 
-          {/* 여행방 전환 (인증됨) + 여행방 추가 버튼 */}
+          {/* Trip selector + add button */}
           {isAuthenticated && !isWrongChain && (
             <div className="mb-2 flex items-center gap-2 flex-wrap">
               {serverTrips.length > 0 && (
-                <span className="text-xs text-stone-500">여행방:</span>
+                <span className="text-xs text-stone-500">{t("my_trips")}:</span>
               )}
-              {serverTrips.map((t) => (
+              {serverTrips.map((tr) => (
                 <button
-                  key={t.id}
-                  onClick={() => setSelectedDbTripId(t.id)}
+                  key={tr.id}
+                  onClick={() => setSelectedDbTripId(tr.id)}
                   className={`px-2 py-0.5 rounded-full text-xs border transition-colors ${
-                    selectedDbTripId === t.id
+                    selectedDbTripId === tr.id
                       ? "bg-indigo-100 border-indigo-300 text-indigo-700 font-semibold"
                       : "bg-stone-100 border-stone-200 text-stone-500 hover:bg-stone-200"
                   }`}
                 >
-                  {t.name}
+                  {tr.name}
                 </button>
               ))}
               <button
                 onClick={() => setShowCreateModal(true)}
                 className="px-2 py-0.5 rounded-full text-xs border border-dashed border-indigo-400 text-indigo-600 hover:bg-indigo-50 transition-colors"
-                title="여행방 추가"
+                title={t("add_trip")}
               >
-                + 여행방 추가
+                {t("add_trip")}
               </button>
               <button
                 onClick={() => { void reloadTrips(); }}
                 className="px-2 py-0.5 rounded-full text-xs border border-stone-300 text-stone-500 hover:bg-stone-100 transition-colors"
-                title="여행방 목록 새로고침"
+                title={t("refresh")}
               >
                 ↻
               </button>
             </div>
           )}
 
-          {/* Arc Testnet 표시 */}
+          {/* Arc Testnet badge */}
           <div className="flex items-center gap-2">
             <span className="px-3 py-1 rounded-full text-xs font-semibold border bg-emerald-100 text-emerald-800 border-emerald-300">
               🔗 Arc Testnet (5042002)
             </span>
             <span className="text-xs text-stone-500">
-              지갑 연결 후 서명으로 로그인
+              {t("sign_in_desc")}
             </span>
           </div>
         </div>
@@ -518,6 +551,11 @@ export default function App() {
                     {trip.itinerary.filter((i) => i.status === "draft").length}
                   </span>
                 )}
+                {tab === "dashboard" && notifUnreadCount > 0 && (
+                  <span className="ml-1.5 text-xs bg-rose-500 text-white rounded-full px-1.5 py-0.5">
+                    {notifUnreadCount}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -530,10 +568,10 @@ export default function App() {
         {/* 서버 오프라인 */}
         {!serverChecking && !serverOnline && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 text-center mt-4">
-            <p className="text-amber-700 font-medium mb-1">⚠ API 서버 오프라인</p>
+            <p className="text-amber-700 font-medium mb-1">⚠ API server offline</p>
             <p className="text-xs text-amber-600">
-              일정·지출·에이전트 데이터는 서버가 실행 중일 때만 저장·복원됩니다.
-              서버를 시작하려면: <code className="font-mono bg-amber-100 px-1 rounded">bun run server</code>
+              Itinerary, expenses and agent data are only persisted while the server is running.
+              To start: <code className="font-mono bg-amber-100 px-1 rounded">bun run server</code>
             </p>
           </div>
         )}
@@ -543,29 +581,29 @@ export default function App() {
           <div className="bg-rose-50 border border-rose-200 rounded-xl p-8 text-center mt-4">
             <p className="text-3xl mb-3">🔗</p>
             <h2 className="text-base font-semibold text-rose-700 mb-2">
-              Arc Testnet으로 전환하세요
+              {t("switch_to_arc")}
             </h2>
             <p className="text-sm text-rose-600 mb-1">
-              현재 체인: <strong>{chainId}</strong> · 필요한 체인: <strong>5042002</strong>
+              Current chain: <strong>{chainId}</strong> · Required: <strong>5042002</strong>
             </p>
             <p className="text-xs text-rose-500">
-              지갑에서 직접 네트워크를 Arc Testnet으로 변경해주세요.
+              Switch to Arc Testnet manually in your wallet.
             </p>
           </div>
         )}
 
-        {/* ── 지갑 미연결: 연결 CTA ── */}
+        {/* ── Wallet not connected ── */}
         {!isConnected && serverOnline && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
             <p className="text-3xl mb-3">👛</p>
-            <h2 className="text-base font-semibold text-stone-700 mb-2">지갑을 연결하세요</h2>
+            <h2 className="text-base font-semibold text-stone-700 mb-2">{t("connect_wallet")}</h2>
             <p className="text-sm text-stone-500 mb-4">
-              상단의 지갑 연결 버튼을 눌러 Arc Testnet 지갑을 연결하세요.
+              Click the wallet button above to connect your Arc Testnet wallet.
             </p>
           </div>
         )}
 
-        {/* ── 지갑 연결됨 + 올바른 체인 + 미인증: 로그인 CTA ── */}
+        {/* ── Connected + correct chain + not authenticated ── */}
         {isConnected && !isWrongChain && serverOnline && !isAuthenticated && !authLoading && (
           <div className={`rounded-xl border p-8 text-center mt-4 ${
             isExpired
@@ -576,12 +614,10 @@ export default function App() {
             <h2 className={`text-base font-semibold mb-2 ${
               isExpired ? "text-amber-800" : "text-stone-700"
             }`}>
-              {isExpired ? "로그인이 만료되었습니다" : "로그인이 필요합니다"}
+              {isExpired ? t("err_401") : t("sign_in")}
             </h2>
             <p className={`text-sm mb-4 ${isExpired ? "text-amber-700" : "text-stone-500"}`}>
-              {isExpired
-                ? "지갑 연결은 유지됩니다. 다시 서명하면 여행방 목록을 불러옵니다."
-                : "지갑 서명으로 로그인하면 여행방 목록을 불러옵니다."}
+              {t("sign_in_desc")}
             </p>
             <button
               onClick={() => { void handleWalletLogin(); }}
@@ -592,45 +628,80 @@ export default function App() {
                   : "bg-indigo-600 hover:bg-indigo-700"
               }`}
             >
-              {isExpired ? "지갑으로 다시 인증" : "지갑 서명으로 로그인"}
+              {t("sign_in")}
             </button>
           </div>
         )}
 
-        {/* 인증됨, 여행방 로드 중 */}
+        {/* Loading trips */}
         {serverOnline && isAuthenticated && tripsLoading && (
-          <div className="text-center py-12 text-stone-400 text-sm">여행방 목록 불러오는 중…</div>
+          <div className="text-center py-12 text-stone-400 text-sm">{t("loading_trips")}</div>
         )}
 
-        {/* 인증됨, 여행방 일반 오류 (401 제외) — 체인이 틀리면 숨김 (체인 안내가 우선) */}
+        {/* Trips error */}
         {serverOnline && isAuthenticated && !isWrongChain && !tripsLoading && tripsError && (
           <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 mt-4 text-xs text-rose-700">
-            여행방 목록 오류: {tripsError}
-            <button onClick={() => { void reloadTrips(); }} className="ml-2 underline">재시도</button>
+            Trip list error: {tripsError}
+            <button onClick={() => { void reloadTrips(); }} className="ml-2 underline">Retry</button>
           </div>
         )}
 
-        {/* ── 인증됨 + API 200 + 빈 배열: 여행방 없음 + 생성 CTA ── */}
+        {/* ── Authenticated, no trips ── */}
         {serverOnline && isAuthenticated && !tripsLoading && !tripsError
           && tripsLoadedOnce && !trip && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
             <p className="text-3xl mb-3">🗺️</p>
-            <h2 className="text-base font-semibold text-stone-700 mb-2">참여한 여행방이 없습니다</h2>
+            <h2 className="text-base font-semibold text-stone-700 mb-2">{t("no_trips")}</h2>
             <p className="text-sm text-stone-500 mb-4">
-              Arc Testnet에서 스마트 컨트랙트로 여행방을 생성하고 여기에 등록하세요.
+              Create a trip on Arc Testnet using the smart contract and register it here.
             </p>
             <button
               onClick={() => setShowCreateModal(true)}
               className="px-5 py-2 rounded-full text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700"
             >
-              + 여행방 추가
+              {t("add_trip")}
             </button>
             <div className="mt-4 text-xs text-stone-400 bg-stone-50 rounded-lg p-3 text-left space-y-1 max-w-sm mx-auto">
-              <p className="font-semibold text-stone-500">등록 방법</p>
-              <p>1. Arc Testnet 지갑에서 <code className="font-mono bg-stone-100 px-1 rounded">MoaArcTreasury.createTrip()</code> 실행</p>
-              <p>2. 트랜잭션이 완료되면 "여행방 추가" 버튼 클릭</p>
-              <p>3. 트랜잭션 해시와 참여자 정보 입력 후 등록</p>
+              <p className="font-semibold text-stone-500">How to create a trip</p>
+              <p>1. Call <code className="font-mono bg-stone-100 px-1 rounded">MoaArcTreasury.createTrip()</code> from your Arc Testnet wallet</p>
+              <p>2. Once the transaction confirms, click "{t("add_trip")}"</p>
+              <p>3. Enter the transaction hash and participant info</p>
             </div>
+          </div>
+        )}
+
+        {/* 알림 패널 — 대시보드 탭 전용 */}
+        {activeTab === "dashboard" && serverNotifications.length > 0 && (
+          <div className="mb-4 space-y-2">
+            <h3 className="text-sm font-semibold text-stone-700">
+              {t("notifications_title")} ({notifUnreadCount > 0 ? `${notifUnreadCount} unread` : "all read"})
+            </h3>
+            {serverNotifications.map((n) => (
+              <div
+                key={n.id}
+                className={`flex items-start justify-between rounded-xl border px-3 py-2 text-sm ${
+                  n.read
+                    ? "bg-stone-50 border-stone-200 text-stone-500"
+                    : "bg-indigo-50 border-indigo-200 text-stone-800"
+                }`}
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-xs">{n.title}</p>
+                  <p className="text-xs mt-0.5 break-words">{n.body}</p>
+                  <p className="text-xs text-stone-400 mt-0.5">{n.createdAt.slice(0, 16).replace("T", " ")}</p>
+                </div>
+                {!n.read && selectedDbTripId && (
+                  <button
+                    onClick={() => {
+                      void markNotificationRead(selectedDbTripId, n.id).then(() => reloadNotifications());
+                    }}
+                    className="ml-2 shrink-0 text-xs text-indigo-600 hover:text-indigo-800 font-medium whitespace-nowrap"
+                  >
+                    {t("mark_read")}
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
         )}
 
@@ -645,7 +716,12 @@ export default function App() {
           />
         )}
         {trip && activeTab === "my" && (
-          <MyExpensesTab trip={trip} currentUserId={currentUserId} />
+          <MyExpensesTab
+            trip={trip}
+            currentUserId={currentUserId}
+            onchainTripId={trip.onchainTripId}
+            connectedAddress={address}
+          />
         )}
         {trip && activeTab === "expenses" && (
           <ExpenseListTab
@@ -703,26 +779,21 @@ export default function App() {
           {!serverChecking && (
             <p className={serverOnline ? "text-emerald-600 font-medium" : "text-amber-500 font-medium"}>
               {serverOnline
-                ? "✓ API 서버 연결됨 — 일정·지출·메모가 DB에 영속 저장됩니다."
-                : "⚠ API 서버 오프라인 — bun run server 로 시작하세요."}
+                ? "✓ API server connected — itinerary, expenses and memos are persisted in DB."
+                : "⚠ API server offline — run: bun run server"}
             </p>
           )}
           {serverOnline && (
             <p className={geminiConfigured ? "text-emerald-600 font-medium" : "text-amber-500 font-medium"}>
               {geminiConfigured
-                ? "✓ Gemini 에이전트 활성 — 실시간 가격 조사 가능"
-                : "⚠ Gemini 미구성 — GEMINI_API_KEY 서버 환경변수 설정 필요"}
+                ? "✓ Gemini agent active — real-time price research available"
+                : "⚠ Gemini not configured — set GEMINI_API_KEY in server env"}
             </p>
           )}
           <p className="text-amber-500 font-medium">
-            ⚠ 푸시 알림 미구현 — 앱 내 알림만 지원합니다.
+            ⚠ Push notifications not implemented — in-app notifications only.
           </p>
-          <p>
-            지출 내역은 수동 입력이며 외부 카드 결제 진위를 앱이 검증하지 않습니다.
-          </p>
-          <p>
-            이 앱은 독립적인 제3자 보안 감사를 받지 않았습니다. 실제 자금 운용 전 감사를 받으세요.
-          </p>
+          <p>{t("footer_disclaimer")}</p>
         </div>
       </footer>
     </div>

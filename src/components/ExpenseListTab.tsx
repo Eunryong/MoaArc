@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useI18n } from "../i18n";
 import type {
   Trip,
   ParticipantId,
@@ -32,10 +33,11 @@ interface Props {
 
 type ViewMode = "list" | "add" | "detail";
 
+// Server values — never translated
 const CATEGORIES = ["식비", "숙박", "교통", "기타"] as const;
 const PAYMENT_FLOWS = [
-  { value: "personal_prepaid", label: "개인 선결제 (나중에 정산)" },
-  { value: "community_release", label: "공동지갑에서 결제 예산 이체" },
+  { value: "personal_prepaid" },
+  { value: "community_release" },
 ] as const;
 
 export default function ExpenseListTab({
@@ -47,6 +49,7 @@ export default function ExpenseListTab({
   allTrips = [],
   onTripSelect,
 }: Props) {
+  const { t } = useI18n();
   const [selectedExpenseId, setSelectedExpenseId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
 
@@ -125,29 +128,29 @@ export default function ExpenseListTab({
       {tripHeader}
       {/* 헤더 행 */}
       <div className="flex items-center justify-between">
-        <span className="text-xs text-stone-500">총 {trip.expenses.length}건</span>
+        <span className="text-xs text-stone-500">{trip.expenses.length} total</span>
         <div className="flex items-center gap-2">
           <span className="text-xs text-stone-400">
-            확정 {trip.expenses.filter(isExpenseConfirmed).length}건 ·
-            대기 {trip.expenses.filter(isExpensePending).length}건
+            {t("status_confirmed")} {trip.expenses.filter(isExpenseConfirmed).length} ·
+            {t("status_pending_approval")} {trip.expenses.filter(isExpensePending).length}
           </span>
           <button
             onClick={() => setViewMode("add")}
             className="text-xs px-3 py-1.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 transition-colors"
           >
-            + 지출 추가
+            {t("add_expense_btn")}
           </button>
         </div>
       </div>
 
       {trip.expenses.length === 0 && (
         <div className="bg-white rounded-xl border border-stone-200 p-8 text-center">
-          <p className="text-stone-400 text-sm">등록된 지출이 없습니다.</p>
+          <p className="text-stone-400 text-sm">{t("no_expenses")}</p>
           <button
             onClick={() => setViewMode("add")}
             className="mt-3 text-sm text-indigo-600 hover:underline"
           >
-            첫 지출 등록하기 →
+            {t("add_expense_btn")} →
           </button>
         </div>
       )}
@@ -175,25 +178,29 @@ export default function ExpenseListTab({
                         : "bg-stone-100 text-stone-500"
                     }`}
                   >
-                    {activeVer?.status ?? "알 수 없음"}
+                    {activeVer?.status === "확정" ? t("status_confirmed")
+                      : activeVer?.status === "승인대기" ? t("status_pending_approval")
+                      : activeVer?.status === "수정안투표중" ? t("status_revision_vote")
+                      : activeVer?.status === "취소됨" ? t("status_cancelled")
+                      : t("status_unknown")}
                   </span>
                   <span className="text-xs bg-stone-100 text-stone-600 px-2 py-0.5 rounded-full">
                     {exp.category}
                   </span>
                   {exp.refunds.length > 0 && (
                     <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
-                      환불 {exp.refunds.length}건
+                      Refund ×{exp.refunds.length}
                     </span>
                   )}
                 </div>
                 <p className="text-sm font-semibold text-stone-800 mt-1.5">{exp.title}</p>
                 <p className="text-xs text-stone-400 mt-0.5">
                   {exp.date.slice(0, 10)} ·
-                  결제자: {trip.participants.find((p) => p.id === exp.paidBy)?.name}
+                  {t("payer_label")}: {trip.participants.find((p) => p.id === exp.paidBy)?.name}
                 </p>
                 {exp.localCurrency && (
                   <p className="text-xs text-stone-400">
-                    현지: {exp.localCurrency} {exp.localAmount?.toLocaleString()}
+                    Local: {exp.localCurrency} {exp.localAmount?.toLocaleString()}
                   </p>
                 )}
               </div>
@@ -202,7 +209,7 @@ export default function ExpenseListTab({
                   {fmtUsdc(exp.totalAmount)} USDC
                 </p>
                 <p className="text-xs text-stone-400 mt-0.5">
-                  v{exp.currentVersion} · {exp.participants.length}명 참여
+                  v{exp.currentVersion} · {exp.participants.length} participants
                 </p>
               </div>
             </div>
@@ -245,6 +252,7 @@ function AddExpenseForm({
   onCancel: () => void;
   onSuccess: () => void;
 }) {
+  const { t } = useI18n();
   const today = new Date().toISOString().slice(0, 10);
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<typeof CATEGORIES[number]>("식비");
@@ -292,15 +300,15 @@ function AddExpenseForm({
 
   async function handleSubmit() {
     // 입력 검증
-    if (!title.trim()) { setError("제목을 입력하세요."); return; }
-    if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) { setError("날짜 형식이 올바르지 않습니다."); return; }
-    if (!totalParsed || totalParsed <= 0n) { setError("금액은 0보다 커야 합니다."); return; }
-    if (selectedParticipants.size === 0) { setError("분담 대상 참여자를 1명 이상 선택하세요."); return; }
+    if (!title.trim()) { setError(t("err_400")); return; }
+    if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) { setError(t("err_400")); return; }
+    if (!totalParsed || totalParsed <= 0n) { setError(t("err_400")); return; }
+    if (selectedParticipants.size === 0) { setError(t("err_400")); return; }
 
     const shares = computeShares();
     const sharesSum = shares.reduce((s, sh) => s + sh.amount, 0n);
     if (sharesSum !== totalParsed) {
-      setError(`분담 합계(${fmtUsdc(sharesSum)})가 지출 총액(${fmtUsdc(totalParsed)})과 일치하지 않습니다.`);
+      setError(`Split total (${fmtUsdc(sharesSum)}) does not match expense total (${fmtUsdc(totalParsed)}).`);
       return;
     }
 
@@ -321,7 +329,7 @@ function AddExpenseForm({
       });
       onSuccess();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "지출 등록에 실패했습니다.");
+      setError(e instanceof Error ? e.message : t("err_500"));
     } finally {
       setSubmitting(false);
     }
@@ -335,19 +343,19 @@ function AddExpenseForm({
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <button onClick={onCancel} className="text-sm text-stone-500 hover:text-stone-700">
-          ← 목록으로
+          {t("back_to_list")}
         </button>
-        <h2 className="text-base font-semibold text-stone-800">지출 추가</h2>
+        <h2 className="text-base font-semibold text-stone-800">{t("add_expense_form_title")}</h2>
       </div>
 
       <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
         {/* 제목 */}
         <div>
-          <label className="text-xs font-medium text-stone-600 mb-1 block">제목 *</label>
+          <label className="text-xs font-medium text-stone-600 mb-1 block">{t("expense_title_label")} *</label>
           <input
             type="text"
             className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-            placeholder="예: 저녁 식사"
+            placeholder={t("expense_title_placeholder")}
             value={title}
             onChange={(e) => { setTitle(e.target.value); setError(""); }}
           />
@@ -356,7 +364,7 @@ function AddExpenseForm({
         {/* 카테고리 + 날짜 */}
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="text-xs font-medium text-stone-600 mb-1 block">카테고리 *</label>
+            <label className="text-xs font-medium text-stone-600 mb-1 block">{t("category_label")} *</label>
             <select
               className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 bg-white"
               value={category}
@@ -366,7 +374,7 @@ function AddExpenseForm({
             </select>
           </div>
           <div>
-            <label className="text-xs font-medium text-stone-600 mb-1 block">날짜 *</label>
+            <label className="text-xs font-medium text-stone-600 mb-1 block">{t("date_label")} *</label>
             <input
               type="date"
               className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
@@ -378,7 +386,7 @@ function AddExpenseForm({
 
         {/* 금액 */}
         <div>
-          <label className="text-xs font-medium text-stone-600 mb-1 block">금액 (USDC) *</label>
+          <label className="text-xs font-medium text-stone-600 mb-1 block">{t("amount_usdc_label")} *</label>
           <input
             type="number"
             min="0"
@@ -392,7 +400,7 @@ function AddExpenseForm({
 
         {/* 결제 방식 */}
         <div>
-          <label className="text-xs font-medium text-stone-600 mb-1 block">결제 방식 *</label>
+          <label className="text-xs font-medium text-stone-600 mb-1 block">{t("payment_flow_label")} *</label>
           <div className="space-y-1.5">
             {PAYMENT_FLOWS.map((pf) => (
               <label key={pf.value} className="flex items-center gap-2 cursor-pointer">
@@ -404,7 +412,9 @@ function AddExpenseForm({
                   onChange={() => setPaymentFlow(pf.value)}
                   className="accent-indigo-600"
                 />
-                <span className="text-sm text-stone-700">{pf.label}</span>
+                <span className="text-sm text-stone-700">
+                  {pf.value === "personal_prepaid" ? t("payment_flow_personal") : t("payment_flow_community")}
+                </span>
               </label>
             ))}
           </div>
@@ -413,12 +423,12 @@ function AddExpenseForm({
         {/* 분담 대상 */}
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="text-xs font-medium text-stone-600">분담 대상 *</label>
+            <label className="text-xs font-medium text-stone-600">{t("participants_label")} *</label>
             <button
               onClick={() => setUseEqualSplit((v) => !v)}
               className="text-xs text-indigo-600 hover:underline"
             >
-              {useEqualSplit ? "직접 입력으로 전환" : "균등 분배로 전환"}
+              {useEqualSplit ? t("split_switch_manual") : t("split_switch_equal")}
             </button>
           </div>
           <div className="space-y-1.5">
@@ -432,7 +442,7 @@ function AddExpenseForm({
                   id={`p-${p.id}`}
                 />
                 <label htmlFor={`p-${p.id}`} className="text-sm text-stone-700 flex-1 cursor-pointer">
-                  {p.name}{p.id === currentUserId ? " (나)" : ""}
+                  {p.name}{p.id === currentUserId ? ` (${t("me")})` : ""}
                 </label>
                 {!useEqualSplit && selectedParticipants.has(p.id) && (
                   <input
@@ -455,19 +465,19 @@ function AddExpenseForm({
           </div>
           {totalParsed != null && totalParsed > 0n && (
             <div className={`mt-2 text-xs px-3 py-1.5 rounded-lg ${isSharesValid ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
-              분담 합계: {fmtUsdc(sharesSum)} / 총액: {fmtUsdc(totalParsed)}
-              {isSharesValid ? " ✓" : ` (차이: ${fmtUsdc(totalParsed - sharesSum)})`}
+              Split: {fmtUsdc(sharesSum)} / Total: {fmtUsdc(totalParsed)}
+              {isSharesValid ? " ✓" : ` (diff: ${fmtUsdc(totalParsed - sharesSum)})`}
             </div>
           )}
         </div>
 
         {/* 메모 */}
         <div>
-          <label className="text-xs font-medium text-stone-600 mb-1 block">메모 (선택)</label>
+          <label className="text-xs font-medium text-stone-600 mb-1 block">{t("memo_optional_label")}</label>
           <input
             type="text"
             className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-            placeholder="영수증 메모, 현지 금액 등"
+            placeholder={t("memo_placeholder")}
             value={receiptNote}
             onChange={(e) => setReceiptNote(e.target.value)}
           />
@@ -484,7 +494,7 @@ function AddExpenseForm({
           disabled={submitting}
           className="w-full py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 hover:bg-indigo-700 transition-colors"
         >
-          {submitting ? "등록 중…" : "지출 등록"}
+          {submitting ? t("submitting") : t("submit_expense")}
         </button>
       </div>
     </div>
@@ -511,6 +521,7 @@ function ExpenseDetail({
   onTripUpdate: (t: Trip) => void;
   onExpenseReload: () => void;
 }) {
+  const { t } = useI18n();
   const activeVer = getActiveVersion(expense);
   const [editShares, setEditShares] = useState<ShareEntry[]>(
     activeVer?.shares.map((s) => ({ ...s })) ?? []
@@ -538,10 +549,10 @@ function ExpenseDetail({
     setActionMsg(null);
     try {
       await approveExpense(dbTripId, expense.id, { action: "승인" });
-      setActionMsg({ type: "ok", text: "승인이 기록됐습니다." });
+      setActionMsg({ type: "ok", text: t("approve_success") });
       onExpenseReload();
     } catch (e: unknown) {
-      setActionMsg({ type: "err", text: e instanceof Error ? e.message : "승인 실패" });
+      setActionMsg({ type: "err", text: e instanceof Error ? e.message : t("approve_fail") });
     } finally {
       setSubmitting(false);
     }
@@ -553,11 +564,11 @@ function ExpenseDetail({
     setActionMsg(null);
     try {
       await approveExpense(dbTripId, expense.id, { action: "수정요청", reason: rejectReason });
-      setActionMsg({ type: "ok", text: "수정 요청이 접수됐습니다." });
+      setActionMsg({ type: "ok", text: t("revision_request_success") });
       setRejectReason("");
       onExpenseReload();
     } catch (e: unknown) {
-      setActionMsg({ type: "err", text: e instanceof Error ? e.message : "수정 요청 실패" });
+      setActionMsg({ type: "err", text: e instanceof Error ? e.message : t("revision_request_fail") });
     } finally {
       setSubmitting(false);
     }
@@ -576,11 +587,11 @@ function ExpenseDetail({
           amountUsdc: s.amount.toString(),
         })),
       });
-      setActionMsg({ type: "ok", text: "수정안이 제출됐습니다. 참여자 전원 재승인 필요." });
+      setActionMsg({ type: "ok", text: t("admin_edit_success") });
       setEditReason("");
       onExpenseReload();
     } catch (e: unknown) {
-      setActionMsg({ type: "err", text: e instanceof Error ? e.message : "수정안 제출 실패" });
+      setActionMsg({ type: "err", text: e instanceof Error ? e.message : t("admin_edit_fail") });
     } finally {
       setSubmitting(false);
     }
@@ -601,7 +612,7 @@ function ExpenseDetail({
         onClick={onBack}
         className="flex items-center gap-1 text-sm text-stone-500 hover:text-stone-700"
       >
-        ← 지출 목록으로
+        {t("back_to_list")}
       </button>
 
       {/* 기본 정보 */}
@@ -610,17 +621,17 @@ function ExpenseDetail({
           <div>
             <h3 className="text-base font-bold text-stone-800">{expense.title}</h3>
             <p className="text-xs text-stone-400 mt-1">
-              {expense.date.slice(0, 10)} · {expense.category} · 결제자:{" "}
+              {expense.date.slice(0, 10)} · {expense.category} · {t("payer_label")}:{" "}
               {trip.participants.find((p) => p.id === expense.paidBy)?.name}
             </p>
             {expense.localCurrency && (
               <p className="text-xs text-stone-400">
-                현지: {expense.localCurrency} {expense.localAmount?.toLocaleString()}
+                Local: {expense.localCurrency} {expense.localAmount?.toLocaleString()}
               </p>
             )}
             {expense.receiptNote && (
               <p className="text-xs text-stone-400 mt-1">
-                메모: {expense.receiptNote}
+                Note: {expense.receiptNote}
               </p>
             )}
           </div>
@@ -642,16 +653,16 @@ function ExpenseDetail({
       {/* 분담 현황 표 */}
       <div className="bg-white rounded-xl border border-stone-200 p-4">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-stone-700">참여자별 분담 현황</h3>
-          <span className="text-xs text-stone-400">승인 {approvedCount}/{totalParticipants}명</span>
+          <h3 className="text-sm font-semibold text-stone-700">{t("participants_split_status")}</h3>
+          <span className="text-xs text-stone-400">{t("approval_count")} {approvedCount}/{totalParticipants}</span>
         </div>
         <table className="w-full text-sm">
           <thead>
             <tr className="text-xs text-stone-400 border-b border-stone-100">
-              <th className="text-left py-1.5 font-medium">참여자</th>
-              <th className="text-right py-1.5 font-medium">부담액</th>
-              <th className="text-right py-1.5 font-medium">비율</th>
-              <th className="text-right py-1.5 font-medium">승인 상태</th>
+              <th className="text-left py-1.5 font-medium">{t("col_participant")}</th>
+              <th className="text-right py-1.5 font-medium">{t("col_share")}</th>
+              <th className="text-right py-1.5 font-medium">{t("col_ratio")}</th>
+              <th className="text-right py-1.5 font-medium">{t("col_approval")}</th>
             </tr>
           </thead>
           <tbody>
@@ -673,7 +684,7 @@ function ExpenseDetail({
                     <td className="py-2 text-stone-700 font-medium">
                       {name}
                       {s.participantId === currentUserId && (
-                        <span className="ml-1 text-xs text-indigo-600">(나)</span>
+                        <span className="ml-1 text-xs text-indigo-600">({t("me")})</span>
                       )}
                     </td>
                     <td className="py-2 text-right tabular-nums text-stone-800 font-semibold">
@@ -683,15 +694,15 @@ function ExpenseDetail({
                     <td className="py-2 text-right">
                       {appr?.action === "승인" ? (
                         <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">
-                          승인 ✓
+                          {t("approved_label")} ✓
                         </span>
                       ) : appr?.action === "수정요청" ? (
                         <span className="text-xs bg-rose-100 text-rose-700 px-2 py-0.5 rounded-full">
-                          수정 요청
+                          {t("revision_requested_label")}
                         </span>
                       ) : (
                         <span className="text-xs bg-stone-100 text-stone-500 px-2 py-0.5 rounded-full">
-                          미응답
+                          {t("no_response_label")}
                         </span>
                       )}
                     </td>
@@ -706,11 +717,11 @@ function ExpenseDetail({
       {isAdmin && !isConfirmed && (
         <div className="bg-white rounded-xl border border-stone-200 p-4">
           <h3 className="text-sm font-semibold text-stone-700 mb-1">
-            분담액 수정안 제출
-            <span className="ml-2 text-xs font-normal text-stone-400">(관리자 전용)</span>
+            {t("admin_edit_title")}
+            <span className="ml-2 text-xs font-normal text-stone-400">({t("admin_only_badge")})</span>
           </h3>
           <p className="text-xs text-stone-400 mb-3">
-            수정 제출 시 기존 모든 승인이 초기화되고 전원 재승인이 필요합니다.
+            {t("admin_edit_desc")}
           </p>
           <div className="space-y-2 mb-3">
             {editShares
@@ -740,16 +751,16 @@ function ExpenseDetail({
             }`}
           >
             <span>
-              분담 합계: <strong className="tabular-nums">{fmtUsdc(sharesSum)} USDC</strong>
+              Split: <strong className="tabular-nums">{fmtUsdc(sharesSum)} USDC</strong>
             </span>
             <span>
-              {isSharesValid ? "✓ 일치" : `⚠ 차이: ${diff > 0n ? "+" : ""}${fmtUsdc(diff)} USDC`}
+              {isSharesValid ? "✓ OK" : `⚠ diff: ${diff > 0n ? "+" : ""}${fmtUsdc(diff)} USDC`}
             </span>
           </div>
           <input
             type="text"
             className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 mb-2"
-            placeholder="수정 이유 (필수)"
+            placeholder={t("edit_reason_placeholder")}
             value={editReason}
             onChange={(e) => { setEditReason(e.target.value); setActionMsg(null); }}
           />
@@ -758,7 +769,7 @@ function ExpenseDetail({
             disabled={!isSharesValid || !editReason.trim() || submitting}
             className="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-indigo-700 transition-colors"
           >
-            {submitting ? "제출 중…" : "수정안 제출 (전원 재승인 필요)"}
+            {submitting ? t("submitting") : t("admin_submit_btn")}
           </button>
         </div>
       )}
@@ -766,16 +777,16 @@ function ExpenseDetail({
       {/* 참여자 승인 / 수정요청 (서버 저장) */}
       {!isConfirmed && activeVer?.status === "승인대기" && (
         <div className="bg-white rounded-xl border border-stone-200 p-4">
-          <h3 className="text-sm font-semibold text-stone-700 mb-3">내 승인 · 수정 요청</h3>
+          <h3 className="text-sm font-semibold text-stone-700 mb-3">{t("my_approval_title")}</h3>
 
           {hasApproved && (
             <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-700">
-              이미 승인하셨습니다.
+              {t("already_approved")}
             </div>
           )}
           {hasRejected && (
             <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 text-sm text-rose-700">
-              수정 요청을 보냈습니다. 관리자의 재제출을 기다리세요.
+              {t("revision_sent")}
             </div>
           )}
           {!hasApproved && !hasRejected && (
@@ -785,13 +796,13 @@ function ExpenseDetail({
                 disabled={submitting}
                 className="w-full py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 hover:bg-emerald-700 transition-colors"
               >
-                {submitting ? "처리 중…" : "분담안 승인"}
+                {submitting ? t("submitting") : t("approve_btn")}
               </button>
               <div className="flex gap-2">
                 <input
                   type="text"
                   className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-rose-300"
-                  placeholder="수정 요청 사유 (필수)"
+                  placeholder={t("revision_reason_placeholder")}
                   value={rejectReason}
                   onChange={(e) => setRejectReason(e.target.value)}
                 />
@@ -800,7 +811,7 @@ function ExpenseDetail({
                   disabled={!rejectReason.trim() || submitting}
                   className="px-4 py-2 bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-rose-200 transition-colors whitespace-nowrap"
                 >
-                  수정 요청
+                  {t("revision_request_btn")}
                 </button>
               </div>
             </div>
@@ -811,10 +822,8 @@ function ExpenseDetail({
       {/* 환불 처리 — 서버 미지원 (비활성화) */}
       {isAdmin && isConfirmed && (
         <div className="bg-white rounded-xl border border-stone-200 p-4 opacity-60">
-          <h3 className="text-sm font-semibold text-stone-500 mb-1">환불 처리</h3>
-          <p className="text-xs text-stone-400">
-            서버 미지원: 환불 API가 없어 현재 비활성화됩니다.
-          </p>
+          <h3 className="text-sm font-semibold text-stone-500 mb-1">{t("refund_title")}</h3>
+          <p className="text-xs text-stone-400">{t("refund_unavailable")}</p>
         </div>
       )}
 
@@ -834,12 +843,12 @@ function ExpenseDetail({
       {/* 버전 이력 */}
       <div className="bg-white rounded-xl border border-stone-200 p-4">
         <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-semibold text-stone-700">버전 수정 이력</h3>
+          <h3 className="text-sm font-semibold text-stone-700">{t("version_history_title")}</h3>
           <button
             onClick={() => setShowHistory(!showHistory)}
             className="text-xs text-indigo-600 hover:underline"
           >
-            {showHistory ? "접기" : `${expense.versions.length}개 버전 펼치기`}
+            {showHistory ? t("collapse") : `${expense.versions.length} ${t("expand_versions")}`}
           </button>
         </div>
         {showHistory && (
@@ -857,7 +866,7 @@ function ExpenseDetail({
                   <span className="text-xs font-semibold text-stone-600">
                     v{v.version}
                     {v.version === expense.currentVersion && (
-                      <span className="ml-1 text-indigo-600">(현재)</span>
+                      <span className="ml-1 text-indigo-600">({t("current_label")})</span>
                     )}
                   </span>
                   <span
@@ -869,14 +878,17 @@ function ExpenseDetail({
                         : "bg-amber-100 text-amber-700"
                     }`}
                   >
-                    {v.status}
+                    {v.status === "확정" ? t("status_confirmed")
+                      : v.status === "취소됨" ? t("status_cancelled")
+                      : v.status === "승인대기" ? t("status_pending_approval")
+                      : v.status}
                   </span>
                 </div>
                 <p className="text-xs text-stone-500">
-                  제출자: {trip.participants.find((p) => p.id === v.proposedBy)?.name} ·{" "}
+                  {t("proposer_label")}: {trip.participants.find((p) => p.id === v.proposedBy)?.name} ·{" "}
                   {v.proposedAt.slice(0, 16).replace("T", " ")}
                 </p>
-                <p className="text-xs text-stone-500 mt-0.5">사유: {v.reason}</p>
+                <p className="text-xs text-stone-500 mt-0.5">{t("reason_label")}: {v.reason}</p>
                 <div className="mt-2 flex gap-1 flex-wrap">
                   {v.shares
                     .filter((s) => expense.participants.includes(s.participantId))
@@ -899,12 +911,12 @@ function ExpenseDetail({
                         </span>
                         {a.action === "승인" ? (
                           <span className="text-emerald-600">
-                            ✓ 승인 {a.approvedAt?.slice(0, 16).replace("T", " ")}
+                            ✓ {t("approved_label")} {a.approvedAt?.slice(0, 16).replace("T", " ")}
                           </span>
                         ) : a.action === "수정요청" ? (
-                          <span className="text-rose-600">✗ 수정요청</span>
+                          <span className="text-rose-600">✗ {t("revision_requested_label")}</span>
                         ) : (
-                          <span className="text-stone-400">미응답</span>
+                          <span className="text-stone-400">{t("no_response_label")}</span>
                         )}
                       </div>
                     ))}

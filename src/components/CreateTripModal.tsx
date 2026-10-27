@@ -14,13 +14,16 @@
  */
 
 import { useState, useCallback } from "react";
+import { useI18n } from "../i18n";
 import { useSendTransaction, useChainId } from "wagmi";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   prepareCreateTripIntent,
   submitTripIntentTxHash,
   getIntentStatus,
   getToken,
+  getStudioTestAddress,
+  STUDIO_TEST_MODE,
   type TripApiRecord,
 } from "../apiClient";
 
@@ -46,13 +49,14 @@ type Step =
 
 function parseError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  if (msg.includes("User rejected") || msg.includes("user rejected")) return "지갑에서 서명을 취소했습니다.";
-  if (msg.includes("does not match the target chain")) return "지갑을 Arc Testnet으로 전환하세요.";
-  if (msg.includes("insufficient funds")) return "잔액이 부족합니다.";
+  if (msg.includes("User rejected") || msg.includes("user rejected")) return "Signature cancelled.";
+  if (msg.includes("does not match the target chain")) return "Switch wallet to Arc Testnet.";
+  if (msg.includes("insufficient funds")) return "Insufficient funds.";
   return msg.split("\n")[0].slice(0, 120);
 }
 
 export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props) {
+  const { t } = useI18n();
   const chainId = useChainId();
   const isWrongChain = chainId !== ARC_TESTNET_CHAIN_ID;
 
@@ -64,7 +68,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
   const [tripName, setTripName] = useState("");
   const [budgetInput, setBudgetInput] = useState("");
   const [participants, setParticipants] = useState<Participant[]>([
-    { name: "나", address: connectedAddress },
+    { name: t("me"), address: connectedAddress },
   ]);
 
   const { sendTransactionAsync } = useSendTransaction();
@@ -93,7 +97,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
   ) {
     if (step === "polling") {
       setStep("error");
-      setErrorMsg(intentStatus.error ?? "트랜잭션이 실패했습니다.");
+      setErrorMsg(intentStatus.error ?? t("err_500"));
     }
   }
 
@@ -107,11 +111,11 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
 
   // ─── 생성 실행 ──────────────────────────────────────────────────────────────
   const handleCreate = useCallback(async () => {
-    if (!tripName.trim()) { setErrorMsg("여행방 이름을 입력하세요."); return; }
-    if (isWrongChain) { setErrorMsg("Arc Testnet으로 전환하세요."); return; }
+    if (!tripName.trim()) { setErrorMsg(t("err_400")); return; }
+    if (isWrongChain) { setErrorMsg(t("switch_to_arc")); return; }
 
     const budgetUSDC = Number(budgetInput || "0");
-    if (budgetInput && budgetUSDC < 0) { setErrorMsg("예산은 0 이상이어야 합니다."); return; }
+    if (budgetInput && budgetUSDC < 0) { setErrorMsg(t("err_400")); return; }
     const targetBudgetMicro = BigInt(Math.round(budgetUSDC * 1_000_000));
 
     const otherParticipants = participants
@@ -122,8 +126,14 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
     setErrorMsg(null);
 
     // 토큰 확인 — 없으면 재로그인 안내
-    if (!getToken()) {
-      setErrorMsg("로그인이 필요합니다. 지갑 서명으로 다시 로그인해주세요.");
+    // STUDIO_TEST_MODE: getStudioTestAddress()가 있으면 ?as= 우회로 인증됨
+    const hasAuth = STUDIO_TEST_MODE ? !!getStudioTestAddress() : !!getToken();
+    if (!hasAuth) {
+      setErrorMsg(
+        STUDIO_TEST_MODE
+          ? "Test mode: connect your wallet."
+          : t("err_401")
+      );
       setStep("form");
       return;
     }
@@ -163,16 +173,16 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
     }
   }, [
     tripName, budgetInput, participants, connectedAddress,
-    isWrongChain, sendTransactionAsync, queryClient, onCreated,
+    isWrongChain, sendTransactionAsync, queryClient, onCreated, t,
   ]);
 
   // ─── 렌더 ──────────────────────────────────────────────────────────────────
 
   if (step === "preparing" || step === "awaiting_wallet" || step === "polling") {
     const messages: Record<typeof step, string> = {
-      preparing: "서버에서 트랜잭션을 준비하는 중...",
-      awaiting_wallet: "지갑에서 승인 대기 중...",
-      polling: "블록체인에서 확인 중... (최대 1~2분 소요)",
+      preparing: t("creating_preparing"),
+      awaiting_wallet: t("creating_awaiting_wallet"),
+      polling: t("creating_polling"),
     };
     return (
       <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
@@ -181,7 +191,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
           <p className="text-sm text-stone-600 text-center">{messages[step]}</p>
           {step === "polling" && (
             <p className="text-xs text-stone-400 text-center">
-              트랜잭션이 제출됐습니다. 네트워크 상황에 따라 시간이 걸릴 수 있습니다.
+              {t("tx_submitted_note")}
             </p>
           )}
         </div>
@@ -194,7 +204,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
         {/* 헤더 */}
         <div className="flex items-center justify-between p-6 border-b border-stone-100">
-          <h2 className="text-lg font-semibold text-stone-800">여행방 추가</h2>
+          <h2 className="text-lg font-semibold text-stone-800">{t("add_trip")}</h2>
           <button onClick={onClose} className="text-stone-400 hover:text-stone-600 text-xl leading-none">×</button>
         </div>
 
@@ -202,12 +212,12 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
           {/* 체인 경고 */}
           {isWrongChain && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
-              지갑을 Arc Testnet(Chain ID: 5042002)으로 전환하세요. 현재: {chainId}
+              {t("switch_to_arc")} (Chain ID: 5042002). Current: {chainId}
             </div>
           )}
 
-          {/* 에러 */}
-          {step === "error" && errorMsg && (
+          {/* 에러 — form/error 모두 표시 */}
+          {errorMsg && (
             <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 text-sm text-rose-700">
               {errorMsg}
             </div>
@@ -216,13 +226,13 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
           {/* 여행방 이름 */}
           <div>
             <label className="block text-sm font-medium text-stone-700 mb-1.5">
-              여행방 이름 <span className="text-rose-500">*</span>
+              {t("trip_name_label")} <span className="text-rose-500">*</span>
             </label>
             <input
               type="text"
               value={tripName}
               onChange={(e) => setTripName(e.target.value)}
-              placeholder="예: 도쿄 여행 2025"
+              placeholder={t("trip_name_placeholder")}
               className="w-full px-4 py-2.5 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
             />
           </div>
@@ -230,7 +240,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
           {/* 목표 예산 */}
           <div>
             <label className="block text-sm font-medium text-stone-700 mb-1.5">
-              목표 예산 (USDC) — 비워두면 제한 없음
+              {t("budget_label")}
             </label>
             <input
               type="number"
@@ -245,7 +255,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
           {/* 참여자 */}
           <div>
             <label className="block text-sm font-medium text-stone-700 mb-2">
-              참여자 <span className="text-rose-500">*</span>
+              {t("participants_label")} <span className="text-rose-500">*</span>
             </label>
             <div className="space-y-2">
               {participants.map((p, i) => (
@@ -254,14 +264,14 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
                     type="text"
                     value={p.name}
                     onChange={(e) => updateParticipant(i, "name", e.target.value)}
-                    placeholder="이름"
+                    placeholder={t("name_placeholder")}
                     className="w-24 px-3 py-2 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
                   />
                   <input
                     type="text"
                     value={p.address}
                     onChange={(e) => updateParticipant(i, "address", e.target.value)}
-                    placeholder="0x 지갑 주소"
+                    placeholder={t("wallet_address_placeholder")}
                     readOnly={i === 0}
                     className={`flex-1 px-3 py-2 border rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-400 ${
                       i === 0 ? "bg-stone-50 text-stone-500 border-stone-100 cursor-not-allowed" : "border-stone-200"
@@ -280,7 +290,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
               onClick={addParticipant}
               className="mt-2 text-sm text-indigo-600 hover:text-indigo-800"
             >
-              + 참여자 추가
+              + {t("add_participant_btn")}
             </button>
           </div>
         </div>
@@ -291,14 +301,14 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
             onClick={onClose}
             className="flex-1 py-3 rounded-xl border border-stone-200 text-stone-700 text-sm font-medium hover:bg-stone-50"
           >
-            취소
+            {t("cancel_btn")}
           </button>
           <button
             onClick={() => void handleCreate()}
             disabled={isWrongChain || !tripName.trim()}
             className="flex-1 py-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            생성하기
+            {t("create_trip_btn")}
           </button>
         </div>
       </div>

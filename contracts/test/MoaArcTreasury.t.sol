@@ -53,6 +53,27 @@ contract TreasuryHandler is Test {
         ghostBalance += amount;
     }
 
+    /// Invariant action: add a fresh EOA participant when conditions allow.
+    function addParticipant(uint256 seed) external {
+        // Guard: only when status == None, trip not locked, and under the cap
+        MoaArcTreasury.SettlementStatus status = treasury.getSettlementStatus(tripId);
+        if (status != MoaArcTreasury.SettlementStatus.None) return;
+        MoaArcTreasury.Trip memory t = treasury.getTrip(tripId);
+        if (t.locked) return;
+        if (t.participants.length >= 50) return;
+
+        // Derive a deterministic fresh address from seed
+        uint256 pk = bound(seed, 1, type(uint128).max);
+        address newAddr = vm.addr(pk);
+
+        // Skip if already a participant
+        if (treasury.isParticipant(tripId, newAddr)) return;
+
+        vm.prank(admin);
+        treasury.addParticipant(tripId, newAddr);
+        // ghostBalance is unaffected by addParticipant — no token movement
+    }
+
     function releaseBudget(uint256 amount) external {
         MoaArcTreasury.SettlementStatus status = treasury.getSettlementStatus(tripId);
         if (status != MoaArcTreasury.SettlementStatus.None) return;
@@ -190,7 +211,7 @@ contract MoaArcTreasuryTest is Test {
     // =========================================================================
 
     function test_VersionConstant() public view {
-        assertEq(treasury.VERSION(), "MoaArc-2.0");
+        assertEq(treasury.VERSION(), "MoaArc-3.0");
     }
 
     // =========================================================================
@@ -1318,5 +1339,523 @@ contract MoaArcTreasuryInvariantTest is Test {
         uint256 tripBal  = treasury.tripBalance(tripId);
         uint256 contract_ = usdc.balanceOf(address(treasury));
         assertGe(contract_, tripBal);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// addParticipant test suite
+// ─────────────────────────────────────────────────────────────────────────────
+contract MoaArcTreasuryAddParticipantTest is Test {
+    // ── actors ────────────────────────────────────────────────────────────────
+    address internal admin   = makeAddr("admin");
+    address internal alice   = makeAddr("alice");
+    address internal bob     = makeAddr("bob");
+    address internal outside = makeAddr("outside");
+
+    // ── contracts ─────────────────────────────────────────────────────────────
+    MockERC20      internal usdc;
+    MoaArcTreasury internal treasury;
+
+    uint256 internal constant MINT_AMOUNT   = 10_000e6;
+    uint256 internal constant DEPOSIT_AMOUNT = 100e6;
+    uint256 internal constant TARGET_BUDGET  = 900e6;
+
+    // ── setUp ─────────────────────────────────────────────────────────────────
+    function setUp() public {
+        usdc     = new MockERC20("Mock USDC", "mUSDC", 6);
+        treasury = new MoaArcTreasury(address(usdc));
+
+        usdc.mint(admin,   MINT_AMOUNT);
+        usdc.mint(alice,   MINT_AMOUNT);
+        usdc.mint(bob,     MINT_AMOUNT);
+        usdc.mint(outside, MINT_AMOUNT);
+    }
+
+    // ── internal helpers ──────────────────────────────────────────────────────
+
+    /// Creates trip: admin + alice + bob.
+    function _createDefaultTrip() internal returns (uint256 tripId) {
+        address[] memory parts = new address[](2);
+        parts[0] = alice;
+        parts[1] = bob;
+        vm.prank(admin);
+        tripId = treasury.createTrip("Paris 2025", parts, TARGET_BUDGET);
+    }
+
+    /// admin + alice + bob each deposit DEPOSIT_AMOUNT.
+    function _depositAll(uint256 tripId) internal {
+        vm.startPrank(admin);
+        usdc.approve(address(treasury), DEPOSIT_AMOUNT);
+        treasury.deposit(tripId, DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        vm.startPrank(alice);
+        usdc.approve(address(treasury), DEPOSIT_AMOUNT);
+        treasury.deposit(tripId, DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        usdc.approve(address(treasury), DEPOSIT_AMOUNT);
+        treasury.deposit(tripId, DEPOSIT_AMOUNT);
+        vm.stopPrank();
+    }
+
+    /// Build and propose a zero-deficit settlement where totalRefunds == tripBalance.
+    /// members must equal the current participant list (including newAddr if deposited).
+    function _proposeSettlement(
+        uint256 tripId,
+        address[] memory members,
+        uint256[] memory refunds
+    ) internal returns (bytes32 h) {
+        uint256[] memory deficits = new uint256[](members.length);
+        uint256 version = treasury.getSettlementVersion(tripId) + 1;
+        h = keccak256(abi.encode(tripId, version, members, refunds, deficits));
+        vm.prank(admin);
+        treasury.proposeFinalSettlement(tripId, members, refunds, deficits);
+    }
+
+    /// Approve settlement from all supplied signers.
+    function _approveAll(uint256 tripId, bytes32 h, address[] memory signers) internal {
+        for (uint256 i = 0; i < signers.length; i++) {
+            vm.prank(signers[i]);
+            treasury.approveFinalSettlement(tripId, h);
+        }
+    }
+
+    /// Complete a trip (propose → approve all → all claim).
+    function _completeTrip(uint256 tripId) internal {
+        // deposit so tripBalance == 300e6
+        _depositAll(tripId);
+        address[] memory parts = treasury.getTripParticipants(tripId);
+        uint256 n = parts.length;
+        uint256[] memory refunds = new uint256[](n);
+        // give all funds to admin
+        refunds[0] = treasury.tripBalance(tripId);
+        bytes32 h = _proposeSettlement(tripId, parts, refunds);
+        _approveAll(tripId, h, parts);
+        for (uint256 i = 0; i < n; i++) {
+            vm.prank(parts[i]);
+            treasury.claimRefund(tripId);
+        }
+    }
+
+    // =========================================================================
+    // HAPPY PATH
+    // =========================================================================
+
+    // Test 1: isParticipant == true after addParticipant
+    function test_AddParticipant_SetsIsParticipant() public {
+        uint256 id = _createDefaultTrip();
+        address newAddr = makeAddr("newGuy");
+
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+
+        assertTrue(treasury.isParticipant(id, newAddr));
+    }
+
+    // Test 2: getTripParticipants length +1 and contains newAddr
+    function test_AddParticipant_AppearsInParticipantsList() public {
+        uint256 id = _createDefaultTrip();
+        address newAddr = makeAddr("newGuy");
+
+        address[] memory before = treasury.getTripParticipants(id);
+        uint256 lenBefore = before.length;
+
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+
+        address[] memory after_ = treasury.getTripParticipants(id);
+        assertEq(after_.length, lenBefore + 1);
+
+        bool found = false;
+        for (uint256 i = 0; i < after_.length; i++) {
+            if (after_[i] == newAddr) { found = true; break; }
+        }
+        assertTrue(found);
+    }
+
+    // Test 3: new participant can deposit after being added
+    function test_AddParticipant_CanDeposit() public {
+        uint256 id = _createDefaultTrip();
+        address newAddr = makeAddr("newGuy");
+        usdc.mint(newAddr, MINT_AMOUNT);
+
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+
+        uint256 balBefore = treasury.tripBalance(id);
+        vm.startPrank(newAddr);
+        usdc.approve(address(treasury), DEPOSIT_AMOUNT);
+        treasury.deposit(id, DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        assertEq(treasury.depositedAmount(id, newAddr), DEPOSIT_AMOUNT);
+        assertEq(treasury.tripBalance(id), balBefore + DEPOSIT_AMOUNT);
+    }
+
+    // Test 4: admin can call releaseBudget with newAddr as spender
+    function test_AddParticipant_CanReleaseBudgetToNewAddr() public {
+        uint256 id = _createDefaultTrip();
+        address newAddr = makeAddr("newGuy");
+        usdc.mint(newAddr, MINT_AMOUNT);
+
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+
+        // deposit some funds first
+        vm.startPrank(admin);
+        usdc.approve(address(treasury), DEPOSIT_AMOUNT);
+        treasury.deposit(id, DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        uint256 newAddrBalBefore = usdc.balanceOf(newAddr);
+        vm.prank(admin);
+        treasury.releaseBudget(id, newAddr, 50e6, "hotel");
+
+        assertEq(usdc.balanceOf(newAddr), newAddrBalBefore + 50e6);
+        assertEq(treasury.allocatedBudget(id, newAddr), 50e6);
+    }
+
+    // Test 5: proposeFinalSettlement succeeds when newAddr is in members
+    function test_AddParticipant_ProposeSettlementWithNewAddr() public {
+        uint256 id = _createDefaultTrip();
+        address newAddr = makeAddr("newGuy");
+        usdc.mint(newAddr, MINT_AMOUNT);
+
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+
+        // Each of the 4 participants deposits DEPOSIT_AMOUNT → tripBalance = 4 * 100e6
+        _depositAll(id); // admin, alice, bob deposit
+        vm.startPrank(newAddr);
+        usdc.approve(address(treasury), DEPOSIT_AMOUNT);
+        treasury.deposit(id, DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        uint256 tripBal = treasury.tripBalance(id); // 400e6
+
+        // Build members array for all 4 participants
+        address[] memory members = new address[](4);
+        uint256[] memory refunds = new uint256[](4);
+        uint256[] memory deficits = new uint256[](4);
+        // Participants order: admin, alice, bob, newAddr (matches push order)
+        members[0] = admin;
+        members[1] = alice;
+        members[2] = bob;
+        members[3] = newAddr;
+        refunds[0] = tripBal; // admin gets everything back
+        // refunds[1..3] remain 0
+
+        uint256 version = treasury.getSettlementVersion(id) + 1;
+        bytes32 h = keccak256(abi.encode(id, version, members, refunds, deficits));
+
+        vm.prank(admin);
+        treasury.proposeFinalSettlement(id, members, refunds, deficits);
+
+        assertEq(
+            uint256(treasury.getSettlementStatus(id)),
+            uint256(MoaArcTreasury.SettlementStatus.Proposed)
+        );
+    }
+
+    // Test 6: addParticipant does NOT change tripBalance
+    function test_AddParticipant_DoesNotChangeTripBalance() public {
+        uint256 id = _createDefaultTrip();
+        _depositAll(id);
+        address newAddr = makeAddr("newGuy");
+
+        uint256 balBefore = treasury.tripBalance(id);
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+        assertEq(treasury.tripBalance(id), balBefore);
+    }
+
+    // Test 7: addParticipant does NOT change existing participants' depositedAmount or allocatedBudget
+    function test_AddParticipant_DoesNotAffectExistingParticipants() public {
+        uint256 id = _createDefaultTrip();
+        _depositAll(id);
+
+        vm.prank(admin);
+        treasury.releaseBudget(id, alice, 50e6, "spend");
+
+        uint256 aliceDeposited  = treasury.depositedAmount(id, alice);
+        uint256 aliceAllocated  = treasury.allocatedBudget(id, alice);
+        uint256 adminDeposited  = treasury.depositedAmount(id, admin);
+
+        address newAddr = makeAddr("newGuy");
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+
+        assertEq(treasury.depositedAmount(id, alice), aliceDeposited);
+        assertEq(treasury.allocatedBudget(id, alice), aliceAllocated);
+        assertEq(treasury.depositedAmount(id, admin), adminDeposited);
+    }
+
+    // =========================================================================
+    // REVERT PATH
+    // =========================================================================
+
+    // Test 8: Non-admin caller → NotAdmin
+    function test_AddParticipant_RevertsNotAdmin() public {
+        uint256 id = _createDefaultTrip();
+        address newAddr = makeAddr("newGuy");
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(MoaArcTreasury.NotAdmin.selector, id));
+        treasury.addParticipant(id, newAddr);
+    }
+
+    // Test 9: Already-participant address → AlreadyParticipant
+    function test_AddParticipant_RevertsAlreadyParticipant() public {
+        uint256 id = _createDefaultTrip();
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(MoaArcTreasury.AlreadyParticipant.selector, alice));
+        treasury.addParticipant(id, alice);
+    }
+
+    // Test 10: address(0) → ZeroAddress
+    function test_AddParticipant_RevertsZeroAddress() public {
+        uint256 id = _createDefaultTrip();
+
+        vm.prank(admin);
+        vm.expectRevert(MoaArcTreasury.ZeroAddress.selector);
+        treasury.addParticipant(id, address(0));
+    }
+
+    // Test 11: Contract address → ContractAddress
+    function test_AddParticipant_RevertsContractAddress() public {
+        uint256 id = _createDefaultTrip();
+
+        // address(usdc) is a deployed contract — extcodesize > 0
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(MoaArcTreasury.ContractAddress.selector, address(usdc))
+        );
+        treasury.addParticipant(id, address(usdc));
+    }
+
+    // Test 12: MAX_PARTICIPANTS exceeded → TooManyParticipants
+    // Admin is auto-added; pass MAX_PARTICIPANTS-1 = 49 extras to createTrip → 50 total.
+    function test_AddParticipant_RevertsTooManyParticipants() public {
+        uint256 maxParts = treasury.MAX_PARTICIPANTS(); // 50
+        // Pass 49 addresses so that admin + 49 = 50 total (full trip)
+        address[] memory extras = new address[](maxParts - 1);
+        for (uint256 i = 0; i < maxParts - 1; i++) {
+            extras[i] = makeAddr(string(abi.encodePacked("extra", i)));
+        }
+        vm.prank(admin);
+        uint256 id = treasury.createTrip("Full Trip", extras, TARGET_BUDGET);
+
+        // Trip is now at capacity; one more addParticipant must revert
+        address oneMore = makeAddr("oneMore");
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(MoaArcTreasury.TooManyParticipants.selector, maxParts, maxParts + 1)
+        );
+        treasury.addParticipant(id, oneMore);
+    }
+
+    // Test 13: settlementStatus == Proposed → SettlementAlreadyInProgress
+    function test_AddParticipant_RevertsWhenProposed() public {
+        uint256 id = _createDefaultTrip();
+        _depositAll(id);
+
+        address[] memory members = new address[](3);
+        uint256[] memory refunds = new uint256[](3);
+        uint256[] memory deficits = new uint256[](3);
+        members[0] = admin; members[1] = alice; members[2] = bob;
+        refunds[0] = treasury.tripBalance(id);
+        vm.prank(admin);
+        treasury.proposeFinalSettlement(id, members, refunds, deficits);
+
+        address newAddr = makeAddr("newGuy");
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                MoaArcTreasury.SettlementAlreadyInProgress.selector,
+                MoaArcTreasury.SettlementStatus.Proposed
+            )
+        );
+        treasury.addParticipant(id, newAddr);
+    }
+
+    // Test 14: settlementStatus == DeficitPaying → SettlementAlreadyInProgress
+    function test_AddParticipant_RevertsWhenDeficitPaying() public {
+        uint256 id = _createDefaultTrip();
+        _depositAll(id);
+
+        address[] memory members = new address[](3);
+        uint256[] memory refunds = new uint256[](3);
+        uint256[] memory deficits = new uint256[](3);
+        members[0] = admin; members[1] = alice; members[2] = bob;
+        refunds[0] = 350e6; // tripBalance after releaseBudget
+        deficits[1] = 50e6; // alice owes
+
+        vm.prank(admin);
+        treasury.proposeFinalSettlement(id, members, refunds, deficits);
+
+        // alice pays deficit → DeficitPaying
+        vm.startPrank(alice);
+        usdc.approve(address(treasury), 50e6);
+        treasury.payDeficit(id, 50e6);
+        vm.stopPrank();
+
+        address newAddr = makeAddr("newGuy");
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                MoaArcTreasury.SettlementAlreadyInProgress.selector,
+                MoaArcTreasury.SettlementStatus.DeficitPaying
+            )
+        );
+        treasury.addParticipant(id, newAddr);
+    }
+
+    // Test 15: settlementStatus == ClaimStarted → SettlementAlreadyInProgress
+    function test_AddParticipant_RevertsWhenClaimStarted() public {
+        uint256 id = _createDefaultTrip();
+        _depositAll(id);
+
+        // Zero-deficit settlement: admin gets tripBalance back
+        address[] memory members = new address[](3);
+        uint256[] memory refunds = new uint256[](3);
+        uint256[] memory deficits = new uint256[](3);
+        members[0] = admin; members[1] = alice; members[2] = bob;
+        refunds[0] = treasury.tripBalance(id);
+        uint256 version = treasury.getSettlementVersion(id) + 1;
+        bytes32 h = keccak256(abi.encode(id, version, members, refunds, deficits));
+        vm.prank(admin);
+        treasury.proposeFinalSettlement(id, members, refunds, deficits);
+
+        // All approve
+        vm.prank(admin); treasury.approveFinalSettlement(id, h);
+        vm.prank(alice); treasury.approveFinalSettlement(id, h);
+        vm.prank(bob);   treasury.approveFinalSettlement(id, h);
+
+        // First claim → ClaimStarted
+        vm.prank(admin);
+        treasury.claimRefund(id);
+
+        address newAddr = makeAddr("newGuy");
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                MoaArcTreasury.SettlementAlreadyInProgress.selector,
+                MoaArcTreasury.SettlementStatus.ClaimStarted
+            )
+        );
+        treasury.addParticipant(id, newAddr);
+    }
+
+    // Test 16: settlementStatus == Completed → SettlementAlreadyInProgress
+    // (addParticipant checks settlementStatus != None BEFORE checking locked)
+    function test_AddParticipant_RevertsWhenCompleted() public {
+        uint256 id = _createDefaultTrip();
+        _completeTrip(id);
+
+        address newAddr = makeAddr("newGuy");
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                MoaArcTreasury.SettlementAlreadyInProgress.selector,
+                MoaArcTreasury.SettlementStatus.Completed
+            )
+        );
+        treasury.addParticipant(id, newAddr);
+    }
+
+    // Test 17: locked == true (post-Completed) also fires SettlementAlreadyInProgress
+    // because the status check comes before the locked check in addParticipant.
+    function test_AddParticipant_RevertsWhenLocked() public {
+        uint256 id = _createDefaultTrip();
+        _completeTrip(id);
+
+        MoaArcTreasury.Trip memory t = treasury.getTrip(id);
+        assertTrue(t.locked, "trip should be locked after completion");
+
+        address newAddr = makeAddr("newGuy2");
+        vm.prank(admin);
+        // Status == Completed fires before TripLocked
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                MoaArcTreasury.SettlementAlreadyInProgress.selector,
+                MoaArcTreasury.SettlementStatus.Completed
+            )
+        );
+        treasury.addParticipant(id, newAddr);
+    }
+
+    // Test 18: proposeFinalSettlement WITHOUT newAddr in members → ArrayLengthMismatch
+    function test_AddParticipant_ProposeWithoutNewAddrReverts() public {
+        uint256 id = _createDefaultTrip();
+        address newAddr = makeAddr("newGuy");
+
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+        // Now 4 participants: admin, alice, bob, newAddr
+
+        _depositAll(id);
+        uint256 tripBal = treasury.tripBalance(id);
+
+        // Build a 3-member array (missing newAddr) — length mismatch vs 4 participants
+        address[] memory members = new address[](3);
+        uint256[] memory refunds = new uint256[](3);
+        uint256[] memory deficits = new uint256[](3);
+        members[0] = admin; members[1] = alice; members[2] = bob;
+        refunds[0] = tripBal;
+
+        vm.prank(admin);
+        vm.expectRevert(MoaArcTreasury.ArrayLengthMismatch.selector);
+        treasury.proposeFinalSettlement(id, members, refunds, deficits);
+    }
+
+    // =========================================================================
+    // CANCEL PATH
+    // =========================================================================
+
+    // Test 19: cancelSettlement → status back to None → addParticipant succeeds
+    function test_AddParticipant_SucceedsAfterCancelSettlement() public {
+        uint256 id = _createDefaultTrip();
+        _depositAll(id);
+
+        // Propose then cancel
+        address[] memory members = new address[](3);
+        uint256[] memory refunds = new uint256[](3);
+        uint256[] memory deficits = new uint256[](3);
+        members[0] = admin; members[1] = alice; members[2] = bob;
+        refunds[0] = treasury.tripBalance(id);
+        vm.prank(admin);
+        treasury.proposeFinalSettlement(id, members, refunds, deficits);
+
+        vm.prank(admin);
+        treasury.cancelSettlement(id);
+
+        assertEq(
+            uint256(treasury.getSettlementStatus(id)),
+            uint256(MoaArcTreasury.SettlementStatus.None)
+        );
+
+        // addParticipant must now succeed
+        address newAddr = makeAddr("newGuy");
+        vm.prank(admin);
+        treasury.addParticipant(id, newAddr);
+        assertTrue(treasury.isParticipant(id, newAddr));
+    }
+
+    // =========================================================================
+    // EVENT
+    // =========================================================================
+
+    // Test 20: addParticipant emits ParticipantAdded(tripId indexed, newParticipant indexed)
+    function test_AddParticipant_EmitsParticipantAdded() public {
+        uint256 id = _createDefaultTrip();
+        address newAddr = makeAddr("newGuy");
+
+        vm.prank(admin);
+        vm.expectEmit(true, true, false, false, address(treasury));
+        emit MoaArcTreasury.ParticipantAdded(id, newAddr);
+        treasury.addParticipant(id, newAddr);
     }
 }

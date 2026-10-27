@@ -10,7 +10,7 @@ contract MoaArcTreasury is ReentrancyGuard {
 
     uint256 public constant MAX_PARTICIPANTS = 50;
     uint256 public constant USDC_DECIMALS = 6;
-    string public constant VERSION = "MoaArc-2.0";
+    string public constant VERSION = "MoaArc-3.0";
 
     enum SettlementStatus {
         None,
@@ -62,6 +62,12 @@ contract MoaArcTreasury is ReentrancyGuard {
     error ExceedsAllocatedBudget(uint256 allocated, uint256 spent, uint256 attempted);
     error InvalidSettlementHash(bytes32 expected, bytes32 provided);
     error SpendAmountExceedsAllocated(uint256 allocated, uint256 alreadySpent, uint256 requested);
+    /// @notice Thrown when a contract address is passed where only an EOA is accepted.
+    /// @dev    Known limitation: this check uses extcodesize, which is 0 for an address that has
+    ///         not yet been deployed (e.g. a CREATE2 address pre-deployment) and non-zero for
+    ///         smart-contract wallets such as Safe or any ERC-4337 account. Smart-contract wallets
+    ///         are therefore rejected by addParticipant. Use an EOA address for participation.
+    error ContractAddress(address addr);
 
     event SettlementCancelled(uint256 indexed tripId);
     event TripCreated(uint256 indexed tripId, address indexed admin, string name, uint256 targetBudget);
@@ -83,6 +89,8 @@ contract MoaArcTreasury is ReentrancyGuard {
     event SettlementLocked(uint256 indexed tripId, SettlementStatus status);
     event TripCompleted(uint256 indexed tripId);
     event VersionInfo(string version);
+    /// @notice Emitted when a new participant is added to an existing trip after creation.
+    event ParticipantAdded(uint256 indexed tripId, address indexed newParticipant);
 
     mapping(uint256 => Trip) public trips;
     mapping(uint256 => mapping(address => uint256)) public depositedAmount;
@@ -154,6 +162,52 @@ contract MoaArcTreasury is ReentrancyGuard {
         }
 
         emit TripCreated(tripId, msg.sender, name, targetBudget);
+    }
+
+    /**
+     * @notice Add a new participant to an existing trip after it has been created.
+     * @dev    Only the trip admin may call this function.
+     *         Allowed only when settlementStatus == None and the trip is not locked.
+     *
+     *         Known limitation: smart-contract wallets (Safe, ERC-4337 accounts, etc.)
+     *         are rejected because extcodesize > 0 for deployed contracts. This is a
+     *         deliberate trade-off: claimRefund performs a USDC safeTransfer to each
+     *         settlement member, and a contract wallet that cannot accept ERC-20 transfers
+     *         would permanently block the settlement for all other participants. If you need
+     *         a smart-contract wallet to participate, use a wrapper EOA or ensure the wallet
+     *         can receive ERC-20 tokens before adding it — but note that addParticipant will
+     *         still revert for any address whose extcodesize is non-zero at call time.
+     *
+     * @param tripId          The on-chain trip identifier.
+     * @param newParticipant  EOA address to add. Must not be zero, already a participant,
+     *                        exceed MAX_PARTICIPANTS, or be a contract address.
+     */
+    function addParticipant(uint256 tripId, address newParticipant)
+        external
+        tripExists(tripId)
+        onlyAdmin(tripId)
+    {
+        if (newParticipant == address(0)) revert ZeroAddress();
+        if (isParticipant[tripId][newParticipant]) revert AlreadyParticipant(newParticipant);
+
+        Trip storage trip = trips[tripId];
+        if (trip.participants.length >= MAX_PARTICIPANTS) {
+            revert TooManyParticipants(MAX_PARTICIPANTS, trip.participants.length + 1);
+        }
+        if (trip.settlementStatus != SettlementStatus.None) {
+            revert SettlementAlreadyInProgress(trip.settlementStatus);
+        }
+        if (trip.locked) revert TripLocked(tripId);
+
+        // Reject contract addresses (smart-contract wallets included — see NatSpec).
+        uint256 codeSize;
+        assembly { codeSize := extcodesize(newParticipant) }
+        if (codeSize > 0) revert ContractAddress(newParticipant);
+
+        isParticipant[tripId][newParticipant] = true;
+        trip.participants.push(newParticipant);
+
+        emit ParticipantAdded(tripId, newParticipant);
     }
 
     function deposit(uint256 tripId, uint256 amount)

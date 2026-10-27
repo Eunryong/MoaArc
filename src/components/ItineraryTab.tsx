@@ -9,6 +9,7 @@
 //  TESTNET 모드: 서버 GEMINI_API_KEY 환경변수 필요 (현재 미구성 — 아래 안내 참고)
 
 import { useState, useRef, useEffect } from "react";
+import { useI18n } from "../i18n";
 import type {
   Trip,
   ParticipantId,
@@ -32,6 +33,8 @@ interface Props {
   onItineraryReload?: () => void | Promise<void>;
 }
 
+
+
 // 신뢰도 배지
 function ConfidenceBadge({ level, note }: { level: CostEstimateConfidence; note?: string }) {
   const styles: Record<CostEstimateConfidence, string> = {
@@ -40,11 +43,12 @@ function ConfidenceBadge({ level, note }: { level: CostEstimateConfidence; note?
     low: "bg-rose-100 text-rose-700 border-rose-200",
     unknown: "bg-stone-100 text-stone-500 border-stone-200",
   };
+  const { t } = useI18n();
   const labels: Record<CostEstimateConfidence, string> = {
-    high: "높은 신뢰도",
-    medium: "중간 신뢰도",
-    low: "낮은 신뢰도",
-    unknown: "가격 자료 없음",
+    high: t("confidence_high"),
+    medium: t("confidence_medium"),
+    low: t("confidence_low"),
+    unknown: t("confidence_unknown"),
   };
   return (
     <span
@@ -68,13 +72,14 @@ function ItineraryCard({
   onConfirm: (id: string) => void;
   onCancel: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const catColors: Record<string, string> = {
     식비: "bg-orange-50 text-orange-700 border-orange-200",
     숙박: "bg-indigo-50 text-indigo-700 border-indigo-200",
     교통: "bg-sky-50 text-sky-700 border-sky-200",
     기타: "bg-stone-50 text-stone-600 border-stone-200",
   };
-  const date = new Date(item.date).toLocaleDateString("ko-KR", {
+  const date = new Date(item.date).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -100,12 +105,12 @@ function ItineraryCard({
             </span>
             {item.status === "draft" && (
               <span className="text-xs px-1.5 py-0.5 rounded border bg-amber-100 text-amber-700 border-amber-200">
-                에이전트 초안 — 확인 필요
+                {t("itinerary_draft_badge")}
               </span>
             )}
             {item.status === "cancelled" && (
               <span className="text-xs px-1.5 py-0.5 rounded border bg-stone-100 text-stone-500 border-stone-200">
-                취소됨
+                {t("status_cancelled")}
               </span>
             )}
           </div>
@@ -138,19 +143,19 @@ function ItineraryCard({
                 rel="noreferrer"
                 className="text-xs text-indigo-500 hover:underline block truncate max-w-[140px]"
               >
-                출처 ↗
+                {t("source_link")} ↗
               </a>
             )}
             {est.retrievedAt && (
               <p className="text-xs text-stone-400">
-                조회: {new Date(est.retrievedAt).toLocaleDateString("ko-KR")}
+                {t("retrieved_at")}: {new Date(est.retrievedAt).toLocaleDateString()}
               </p>
             )}
           </div>
         ) : (
           <div className="text-right shrink-0">
             <ConfidenceBadge level="unknown" />
-            <p className="text-xs text-stone-400 mt-1">수동 입력 필요</p>
+            <p className="text-xs text-stone-400 mt-1">{t("manual_input_needed")}</p>
           </div>
         )}
       </div>
@@ -158,7 +163,7 @@ function ItineraryCard({
       {/* 연결 지출 */}
       {item.linkedExpenseId && (
         <p className="text-xs text-stone-400 mt-2 border-t border-stone-100 pt-2">
-          연결된 지출: {item.linkedExpenseId}
+          Linked expense: {item.linkedExpenseId}
         </p>
       )}
 
@@ -169,18 +174,18 @@ function ItineraryCard({
             onClick={() => onConfirm(item.id)}
             className="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 font-medium"
           >
-            일정 확정
+            {t("itinerary_confirm_btn")}
           </button>
           <button
             onClick={() => onCancel(item.id)}
             className="px-3 py-1.5 text-xs bg-stone-100 text-stone-600 rounded-lg hover:bg-stone-200"
           >
-            건너뜀
+            {t("skip_btn")}
           </button>
         </div>
       )}
       {item.status === "draft" && !isAdmin && (
-        <p className="text-xs text-amber-600 mt-2">관리자가 확정 전 대기 중</p>
+        <p className="text-xs text-amber-600 mt-2">{t("admin_confirm_pending")}</p>
       )}
     </div>
   );
@@ -196,6 +201,7 @@ function MessageBubble({
   onAccept?: (id: string) => void;
   onReject?: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const isUser = msg.role === "user";
   const isSystem = msg.role === "system";
 
@@ -224,7 +230,7 @@ function MessageBubble({
         <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
         {msg.hasError && (
           <p className="text-xs text-rose-400 mt-1">
-            ⚠️ {msg.errorDetail ?? "오류 발생"}
+            ⚠️ {msg.errorDetail ?? t("err_500")}
           </p>
         )}
         {/* 제안 카드 */}
@@ -236,26 +242,26 @@ function MessageBubble({
                   onClick={() => onAccept(msg.id)}
                   className="px-2 py-1 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700"
                 >
-                  {msg.proposal.confirmLabel ?? "확인"}
+                  {msg.proposal.confirmLabel ?? t("confirm_btn")}
                 </button>
                 <button
                   onClick={() => onReject(msg.id)}
                   className="px-2 py-1 text-xs bg-stone-100 text-stone-600 rounded-lg hover:bg-stone-200"
                 >
-                  {msg.proposal.rejectLabel ?? "건너뜀"}
+                  {msg.proposal.rejectLabel ?? t("skip_btn")}
                 </button>
               </div>
             )}
           </div>
         )}
         {msg.proposalResolution === "accepted" && (
-          <p className="text-xs text-emerald-400 mt-1">확인됨</p>
+          <p className="text-xs text-emerald-400 mt-1">{t("accepted_label")}</p>
         )}
         {msg.proposalResolution === "rejected" && (
-          <p className="text-xs text-stone-400 mt-1">건너뜀</p>
+          <p className="text-xs text-stone-400 mt-1">{t("skipped_label")}</p>
         )}
         <p className={`text-xs mt-1 ${isUser ? "text-indigo-200" : "text-stone-400"}`}>
-          {new Date(msg.timestamp).toLocaleTimeString("ko-KR", {
+          {new Date(msg.timestamp).toLocaleTimeString(undefined, {
             hour: "2-digit",
             minute: "2-digit",
           })}
@@ -268,6 +274,7 @@ function MessageBubble({
 // ─── 예산 요약 배너 ────────────────────────────────────────────────────────
 
 function ItineraryBudgetBanner({ trip }: { trip: Trip }) {
+  const { t } = useI18n();
   const confirmed = trip.itinerary.filter((i: ItineraryItem) => i.status === "confirmed");
   const drafts = trip.itinerary.filter((i: ItineraryItem) => i.status === "draft");
 
@@ -298,41 +305,41 @@ function ItineraryBudgetBanner({ trip }: { trip: Trip }) {
 
   return (
     <div className="bg-white rounded-xl border border-stone-200 p-4 mb-4">
-      <h3 className="text-sm font-semibold text-stone-700 mb-3">예산 요약</h3>
+      <h3 className="text-sm font-semibold text-stone-700 mb-3">{t("budget_summary_title")}</h3>
       <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
         <div>
-          <p className="text-stone-400">일정 예상 범위</p>
+          <p className="text-stone-400">{t("itinerary_est_range")}</p>
           <p className="font-semibold text-stone-800">
             {fmtUsdc(estMin)}–{fmtUsdc(estMax)} USDC
           </p>
         </div>
         <div>
-          <p className="text-stone-400">확정 실제 지출</p>
+          <p className="text-stone-400">{t("actual_confirmed_expense")}</p>
           <p className="font-semibold text-stone-800">
             {fmtUsdc(actualConfirmed)} USDC
           </p>
         </div>
         <div>
-          <p className="text-stone-400">실제 vs 예상 차이</p>
+          <p className="text-stone-400">{t("actual_vs_est")}</p>
           <p className={`font-semibold ${variance > 0n ? "text-rose-600" : "text-emerald-600"}`}>
             {variance >= 0n ? "+" : ""}{fmtUsdc(variance)} USDC
           </p>
         </div>
         <div>
-          <p className="text-stone-400">일정 현황</p>
+          <p className="text-stone-400">{t("itinerary_status")}</p>
           <p className="font-semibold text-stone-700">
-            확정 {confirmed.length}건 / 초안 {drafts.length}건
+            {t("status_confirmed")} {confirmed.length} / draft {drafts.length}
           </p>
         </div>
       </div>
       {(unknownCount > 0 || lowConfCount > 0) && (
         <p className="text-xs text-amber-600 mt-2 bg-amber-50 px-2 py-1 rounded">
-          ⚠️ 가격 자료 없음 {unknownCount}건, 낮은 신뢰도 {lowConfCount}건 — 수동 확인 필요
+          ⚠️ {t("confidence_unknown")} ×{unknownCount}, {t("confidence_low")} ×{lowConfCount} — manual check needed
         </p>
       )}
       {variance > estMax && (
         <p className="text-xs text-rose-600 mt-2 bg-rose-50 px-2 py-1 rounded">
-          🔴 실제 누적 지출이 예상 상한({fmtUsdc(estMax)} USDC)을 초과했습니다.
+          🔴 Actual expenses exceeded estimate ceiling ({fmtUsdc(estMax)} USDC).
         </p>
       )}
     </div>
@@ -341,6 +348,7 @@ function ItineraryBudgetBanner({ trip }: { trip: Trip }) {
 
 // ─── 메인 컴포넌트 ────────────────────────────────────────────────────────
 
+// ─── Main component ──────────────────────────────────────────────────────────
 export default function ItineraryTab({
   trip,
   currentUserId,
@@ -348,8 +356,9 @@ export default function ItineraryTab({
   agentMessages,
   onAgentMessagesUpdate,
   dbTripId,
-  onItineraryReload: _onItineraryReload,
+  onItineraryReload,
 }: Props) {
+  const { t } = useI18n();
   const isAdmin = trip?.participants.find((p) => p.id === currentUserId)?.isAdmin ?? false;
   const [inputText, setInputText] = useState("");
   const [activeView, setActiveView] = useState<"itinerary" | "chat">("itinerary");
@@ -360,15 +369,18 @@ export default function ItineraryTab({
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [agentMessages]);
 
+  const [itineraryError, setItineraryError] = useState<string | null>(null);
+  const [itineraryLoading, setItineraryLoading] = useState(false);
+
   // TESTNET 모드에서 여행방 없을 때 빈 화면
   if (!trip) {
     return (
       <div className="space-y-4">
         <div className="bg-white rounded-xl border border-stone-200 p-8 text-center">
           <p className="text-2xl mb-3">🗓️</p>
-          <h2 className="text-sm font-semibold text-stone-700 mb-2">일정 정보가 없습니다</h2>
+          <h2 className="text-sm font-semibold text-stone-700 mb-2">{t("no_itinerary")}</h2>
           <p className="text-xs text-stone-400">
-            테스트넷 모드에서 여행방을 생성한 뒤 일정을 추가하세요.
+            {t("no_itinerary_desc")}
           </p>
         </div>
       </div>
@@ -378,23 +390,37 @@ export default function ItineraryTab({
   // early return 이후 trip은 반드시 non-null
   const nonNullTrip = trip;
 
-  // 일정 확정
-  function handleConfirmItem(itemId: string) {
-    if (!isAdmin) return;
-    const updated = nonNullTrip.itinerary.map((i) =>
-      i.id === itemId ? { ...i, status: "confirmed" as const, updatedAt: new Date().toISOString() } : i
-    );
-    onTripUpdate({ ...nonNullTrip, itinerary: updated });
-    addAgentMsg(`일정 "${nonNullTrip.itinerary.find((i) => i.id === itemId)?.activity}"이(가) 확정되었습니다.`);
+  // 일정 확정 — 서버 PATCH status=confirmed
+  async function handleConfirmItem(itemId: string) {
+    if (!isAdmin || !dbTripId) return;
+    setItineraryError(null);
+    setItineraryLoading(true);
+    try {
+      const { updateItineraryItem } = await import("../apiClient");
+      await updateItineraryItem(dbTripId, itemId, { status: "confirmed" });
+      await onItineraryReload?.();
+      addAgentMsg(`Itinerary item "${nonNullTrip.itinerary.find((i) => i.id === itemId)?.activity}" confirmed.`);
+    } catch (e) {
+      setItineraryError(e instanceof Error ? e.message : t("err_500"));
+    } finally {
+      setItineraryLoading(false);
+    }
   }
 
-  // 일정 취소
-  function handleCancelItem(itemId: string) {
-    if (!isAdmin) return;
-    const updated = nonNullTrip.itinerary.map((i) =>
-      i.id === itemId ? { ...i, status: "cancelled" as const, updatedAt: new Date().toISOString() } : i
-    );
-    onTripUpdate({ ...nonNullTrip, itinerary: updated });
+  // 일정 취소 — 서버 PATCH status=cancelled
+  async function handleCancelItem(itemId: string) {
+    if (!isAdmin || !dbTripId) return;
+    setItineraryError(null);
+    setItineraryLoading(true);
+    try {
+      const { updateItineraryItem } = await import("../apiClient");
+      await updateItineraryItem(dbTripId, itemId, { status: "cancelled" });
+      await onItineraryReload?.();
+    } catch (e) {
+      setItineraryError(e instanceof Error ? e.message : t("err_500"));
+    } finally {
+      setItineraryLoading(false);
+    }
   }
 
   // 에이전트 메시지 추가
@@ -410,7 +436,7 @@ export default function ItineraryTab({
     onAgentMessagesUpdate([...agentMessages, msg]);
   }
 
-  // 제안 수락/거절
+  // 제안 수락 — 서버 POST로 초안 일정 저장
   function handleAcceptProposal(msgId: string) {
     const msg = agentMessages.find((m) => m.id === msgId);
     if (!msg?.proposal) return;
@@ -418,18 +444,37 @@ export default function ItineraryTab({
       m.id === msgId ? { ...m, proposalResolution: "accepted" as const } : m
     );
     onAgentMessagesUpdate(updated);
-    // 초안 일정을 여행에 추가 (관리자만)
-    if (msg.proposal.itineraryDrafts && isAdmin) {
-      onTripUpdate({
-        ...nonNullTrip,
-        itinerary: [
-          ...nonNullTrip.itinerary.filter(
-            (i) => !msg.proposal?.itineraryDrafts?.some((d) => d.id === i.id)
-          ),
-          ...msg.proposal.itineraryDrafts,
-        ],
-      });
-      addAgentMsg("초안 일정이 추가되었습니다. 관리자가 각 항목을 확인해주세요.");
+
+    if (msg.proposal.itineraryDrafts && isAdmin && dbTripId) {
+      setItineraryLoading(true);
+      setItineraryError(null);
+      const drafts = msg.proposal.itineraryDrafts;
+      void (async () => {
+        try {
+          const { addItineraryItem } = await import("../apiClient");
+          for (const d of drafts) {
+            const loc = (d as { place?: string; location?: string }).place
+              ?? (d as { location?: string }).location
+              ?? "미정";
+            const timeVal = (d as { time?: string }).time;
+            const note = (d as { note?: string }).note;
+            await addItineraryItem(dbTripId, {
+              date: d.date,
+              time: timeVal,
+              location: loc,
+              activity: d.activity,
+              participants: [],
+              notes: note,
+            });
+          }
+          await onItineraryReload?.();
+          addAgentMsg(`${drafts.length} draft item(s) saved. Admin confirmation required.`);
+        } catch (e) {
+          setItineraryError(e instanceof Error ? e.message : t("err_500"));
+        } finally {
+          setItineraryLoading(false);
+        }
+      })();
     }
   }
 
@@ -469,8 +514,8 @@ export default function ItineraryTab({
 
     if (!getToken()) {
       addAgentMsg(
-        "서버 로그인이 필요합니다. 상단의 '지갑 서명으로 로그인' 버튼을 눌러주세요.",
-        true, "인증 필요"
+        "Server login required. Click 'Sign in with wallet' above.",
+        true, "auth required"
       );
       return;
     }
@@ -527,8 +572,8 @@ export default function ItineraryTab({
                       }
                     : null,
                 })),
-                confirmLabel: "일정에 추가",
-                rejectLabel: "건너뜀",
+                confirmLabel: t("add_to_itinerary"),
+                rejectLabel: t("skip_btn"),
               },
               proposalResolution: "pending" as const,
             }
@@ -549,7 +594,7 @@ export default function ItineraryTab({
         {
           id: `msg-${String(Date.now())}-err`,
           role: "agent" as const,
-          content: `서버 오류: ${errMsg}`,
+          content: `Server error: ${errMsg}`,
           timestamp: new Date().toISOString(),
           hasError: true,
           errorDetail: errMsg,
@@ -572,7 +617,7 @@ export default function ItineraryTab({
               : "text-stone-500 hover:bg-stone-50"
           }`}
         >
-          일정 목록
+          {t("itinerary_view_tab")}
         </button>
         <button
           onClick={() => setActiveView("chat")}
@@ -582,27 +627,35 @@ export default function ItineraryTab({
               : "text-stone-500 hover:bg-stone-50"
           }`}
         >
-          에이전트 대화
+          {t("agent_chat_tab")}
         </button>
       </div>
 
       {/* 예산 요약 배너 (공통) */}
       <ItineraryBudgetBanner trip={trip} />
 
+      {/* 일정 서버 오류 표시 */}
+      {itineraryError && (
+        <div className="bg-rose-50 rounded-xl border border-rose-200 px-3 py-2 text-xs text-rose-700">
+          ⚠ {itineraryError}
+        </div>
+      )}
+
       {/* 일정 목록 뷰 */}
       {activeView === "itinerary" && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold text-stone-700">
-              일정 ({activeItinerary.length}개)
+              {t("itinerary_view_tab")} ({activeItinerary.length})
+              {itineraryLoading && <span className="ml-2 text-xs text-stone-400">{t("saving")}</span>}
             </h3>
           </div>
 
           {activeItinerary.length === 0 ? (
             <div className="bg-white rounded-xl border border-stone-200 p-8 text-center">
-              <p className="text-stone-400 text-sm">등록된 일정이 없습니다.</p>
+              <p className="text-stone-400 text-sm">{t("no_itinerary")}</p>
               <p className="text-xs text-stone-400 mt-1">
-                에이전트 대화 탭에서 일정을 추가해보세요.
+                {t("no_itinerary_desc")}
               </p>
             </div>
           ) : (
@@ -620,11 +673,11 @@ export default function ItineraryTab({
           {/* 비용 예측 신뢰도 안내 */}
           <div className="bg-stone-50 rounded-xl border border-stone-200 p-3">
             <p className="text-xs text-stone-500 leading-relaxed">
-              ℹ️ 비용 예측은 에이전트 조사 결과이며 실제 금액과 다를 수 있습니다.
+              ℹ️ Cost estimates are from agent research and may differ from actual amounts.
               <br />
-              실제 지출은 "지출 목록" 탭에서 수동 기록 후 전원 승인을 받아야 확정됩니다.
+              Actual expenses must be recorded manually in the Expenses tab and approved by all participants.
               <br />
-              <strong>에이전트 제안이 지갑 거래나 분담액을 자동으로 변경하지 않습니다.</strong>
+              <strong>Agent proposals never automatically change wallet transactions or splits.</strong>
             </p>
           </div>
         </div>
@@ -635,8 +688,7 @@ export default function ItineraryTab({
         <div className="flex flex-col" style={{ height: "520px" }}>
           {/* API 상태 안내 */}
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-xs text-amber-700 mb-3">
-            <strong>서버 API 필요</strong> — 실제 Gemini 검색을 사용하려면 서버에
-            GEMINI_API_KEY 설정이 필요합니다. 미설정 시 로컬 처리로 응답합니다.
+            <strong>Server API required</strong> — set GEMINI_API_KEY in server env for real Gemini search. Falls back to local processing otherwise.
           </div>
 
           {/* 메시지 목록 */}
@@ -659,7 +711,7 @@ export default function ItineraryTab({
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }}
-              placeholder="일정·비용 질문, 변경 요청을 입력하세요..."
+              placeholder={t("agent_chat_placeholder")}
               className="flex-1 border border-stone-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 bg-white"
             />
             <button
@@ -667,13 +719,13 @@ export default function ItineraryTab({
               disabled={!inputText.trim()}
               className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              전송
+              {t("send_btn")}
             </button>
           </div>
 
           {/* 에이전트 권한 안내 */}
           <p className="text-xs text-stone-400 mt-2 text-center">
-            에이전트는 제안만 합니다. 확정·서명·이체는 항상 사용자가 직접 처리합니다.
+            {t("agent_disclaimer")}
           </p>
         </div>
       )}

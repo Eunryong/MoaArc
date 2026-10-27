@@ -9,12 +9,15 @@ import * as repo from "../repositories/trip.repository.js";
 
 // ─── 터널 body 파싱 ──────────────────────────────────────────────────────────
 // GET ?_method=POST&_body=<base64> 터널 요청에서는 실제 HTTP body가 없습니다.
-// _tunnelBody context 값을 우선 사용하고, 없으면 req.json() 으로 fallback합니다.
+// GET 터널(_method=POST) 또는 일반 POST에서 JSON body를 파싱합니다.
 async function parseBody<T>(c: Context): Promise<T> {
-  const tunnelBody = c.get("_tunnelBody" as never) as string | undefined;
-  if (tunnelBody) {
-    try { return JSON.parse(tunnelBody) as T; }
-    catch { throw Object.assign(new Error("터널 body JSON 파싱 실패"), { status: 400 }); }
+  const tunnelB64 = c.req.query("_body");
+  if (tunnelB64) {
+    try {
+      return JSON.parse(decodeURIComponent(escape(atob(tunnelB64)))) as T;
+    } catch {
+      throw Object.assign(new Error("터널 body JSON 파싱 실패"), { status: 400 });
+    }
   }
   return c.req.json<T>();
 }

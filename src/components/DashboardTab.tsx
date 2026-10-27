@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useI18n } from "../i18n";
 import type { Trip, ParticipantId } from "../types";
 import {
   getTotalAllocated,
@@ -21,6 +22,7 @@ import {
   useTripBalance,
   useDepositedAmount,
   useUsdcBalance,
+  useSettlementStatus,
 } from "../useContractState";
 
 interface Props {
@@ -33,6 +35,7 @@ interface Props {
 }
 
 export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTripUpdate, connectedAddress, isWrongChain }: Props) {
+  const { t } = useI18n();
   const [depositInput, setDepositInput] = useState("");
   const [depositMsg, setDepositMsg] = useState("");
   const [releaseInput, setReleaseInput] = useState("");
@@ -56,6 +59,7 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
   const tripBalanceResult = useTripBalance(onchainTripId, enabled);
   const myDepositResult = useDepositedAmount(onchainTripId, connectedAddress, enabled && !!connectedAddress);
   const myUsdcResult = useUsdcBalance(connectedAddress, !!connectedAddress);
+  const settlementStatusResult = useSettlementStatus(onchainTripId, enabled);
 
   // 읽기 결과 (실패 = undefined, 로딩 중 = undefined)
   const contractBalance: bigint | undefined = tripBalanceResult.data;
@@ -85,7 +89,7 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
   async function handleOnchainDeposit() {
     const amt = parseUsdcInput(depositInput);
     if (!amt || amt <= 0n) {
-      setDepositMsg("올바른 금액을 입력해주세요.");
+      setDepositMsg(t("err_400"));
       return;
     }
     setDepositMsg("");
@@ -98,7 +102,7 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
   async function handleOnchainRelease() {
     const amt = parseUsdcInput(releaseInput);
     if (!amt || amt <= 0n) {
-      setReleaseMsg("올바른 금액을 입력해주세요.");
+      setReleaseMsg(t("err_400"));
       return;
     }
     const spenderAddr = trip.participants.find((p) => p.id === releaseTarget)?.address as `0x${string}` | undefined;
@@ -114,7 +118,7 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
   async function handleOnchainReturn() {
     const amt = parseUsdcInput(returnInput);
     if (!amt || amt <= 0n) {
-      setReturnMsg("올바른 금액을 입력해주세요.");
+      setReturnMsg(t("err_400"));
       return;
     }
     setReturnMsg("");
@@ -132,35 +136,35 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
     <div className="space-y-4">
       {/* 여행 요약 */}
       <div className="bg-white rounded-xl border border-stone-200 p-4">
-        <h3 className="text-sm font-semibold text-stone-700 mb-3">공동지갑 현황</h3>
+        <h3 className="text-sm font-semibold text-stone-700 mb-3">{t("shared_wallet")}</h3>
         <div className="grid grid-cols-2 gap-2 text-sm">
           <Row
-            label="총 입금액 (tripBalance)"
-            value={contractBalanceError ? "읽기 실패" : contractBalance === undefined ? "조회 중…" : `${fmtUsdc(contractBalance)} USDC`}
+            label={t("total_deposited")}
+            value={contractBalanceError ? t("read_failed") : contractBalance === undefined ? t("checking") : `${fmtUsdc(contractBalance)} USDC`}
             highlight
           />
           <Row
-            label="내 입금 완료액"
-            value={myDepositError ? "읽기 실패" : myDepositOnchain === undefined ? "조회 중…" : `${fmtUsdc(myDepositOnchain)} USDC`}
+            label={t("my_deposit")}
+            value={myDepositError ? t("read_failed") : myDepositOnchain === undefined ? t("checking") : `${fmtUsdc(myDepositOnchain)} USDC`}
           />
           <Row
-            label="외부 결제지갑 공동자금"
+            label={t("external_wallet_budget")}
             value={`${fmtUsdc(totalAllocated)} USDC`}
-            note="※ 공동지갑과 중복 아님"
+            note={t("external_wallet_note")}
           />
-          <Row label="확정 누적 지출" value={`${fmtUsdc(confirmedExpenses)} USDC`} />
+          <Row label={t("confirmed_expenses")} value={`${fmtUsdc(confirmedExpenses)} USDC`} />
           <Row
-            label="대기 중 지출"
+            label={t("pending_expenses")}
             value={`${fmtUsdc(pendingExpenses)} USDC`}
-            badge={pendingCount > 0 ? `${pendingCount}건 미확정` : undefined}
+            badge={pendingCount > 0 ? `${pendingCount} ${t("unconfirmed_badge")}` : undefined}
           />
-          <Row label="목표 예산" value={`${fmtUsdc(trip.targetBudget)} USDC`} />
+          <Row label={t("target_budget")} value={`${fmtUsdc(trip.targetBudget)} USDC`} />
         </div>
       </div>
 
-      {/* 컨트랙트 주소 */}
+      {/* Smart contract card */}
       <div className="bg-white rounded-xl border border-stone-200 p-4">
-        <h3 className="text-sm font-semibold text-stone-700 mb-2">스마트 컨트랙트 (V2)</h3>
+        <h3 className="text-sm font-semibold text-stone-700 mb-2">{t("smart_contract")}</h3>
         <a
           href={`https://explorer.testnet.arc.io/address/${trip.contractAddress}`}
           target="_blank"
@@ -169,27 +173,36 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
         >
           {trip.contractAddress}
         </a>
-        <p className="text-xs text-stone-400 mt-1">Arc Testnet · USDC 0x3600…0000 (6 decimals)</p>
+        <p className="text-xs text-stone-400 mt-1">{t("arc_testnet_note")}</p>
         <p className="text-xs text-stone-400">
-          온체인 정산 상태: <strong>{trip.onchainSettlementStatus ?? "알 수 없음"}</strong>
+          {t("onchain_settlement_status")}:{" "}
+          <strong>
+            {!enabled
+              ? t("status_unknown")
+              : settlementStatusResult.isError
+              ? t("status_error")
+              : settlementStatusResult.settlementStatus === undefined
+              ? t("status_loading")
+              : settlementStatusResult.settlementStatus}
+          </strong>
         </p>
       </div>
 
-      {/* 입금 카드 */}
+      {/* Deposit card */}
       <div className="bg-white rounded-xl border border-stone-200 p-4">
         <div className="flex items-center gap-2 mb-1">
-          <h3 className="text-sm font-semibold text-stone-700">공동지갑 입금</h3>
+          <h3 className="text-sm font-semibold text-stone-700">{t("deposit_card_title")}</h3>
         </div>
         <p className="text-xs text-stone-400 mb-1">
-          내 입금 완료액 (온체인):{" "}
+          {t("my_deposit_onchain")}:{" "}
           <strong className="text-stone-700">
-            {myDepositError ? "읽기 실패" : myDepositOnchain === undefined ? "조회 중…" : `${fmtUsdc(myDepositOnchain)} USDC`}
+            {myDepositError ? t("read_failed") : myDepositOnchain === undefined ? t("checking") : `${fmtUsdc(myDepositOnchain)} USDC`}
           </strong>
         </p>
         <p className="text-xs text-stone-400 mb-3">
-          내 지갑 USDC 잔액:{" "}
+          {t("my_wallet_balance")}:{" "}
           <strong className="text-stone-700">
-            {myUsdcError ? "읽기 실패" : myUsdcBalance === undefined ? "조회 중…" : `${fmtUsdc(myUsdcBalance)} USDC`}
+            {myUsdcError ? t("read_failed") : myUsdcBalance === undefined ? t("checking") : `${fmtUsdc(myUsdcBalance)} USDC`}
           </strong>
         </p>
         <div className="flex gap-2">
@@ -198,17 +211,17 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
             min="0"
             step="0.000001"
             className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-            placeholder="USDC 금액 (예: 100)"
+            placeholder={t("deposit_placeholder")}
             value={depositInput}
             onChange={(e) => { setDepositInput(e.target.value); setDepositMsg(""); depositHook.reset(); }}
           />
           <button
             onClick={() => { void handleDeposit(); }}
             disabled={depositHook.state.status === "pending" || depositHook.state.status === "waiting_approval" || !!isWrongChain}
-            title={isWrongChain ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+            title={isWrongChain ? t("switch_chain_title") : undefined}
             className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            입금
+            {depositHook.state.status === "pending" || depositHook.state.status === "waiting_approval" ? t("depositing") : t("deposit_btn")}
           </button>
         </div>
         {depositMsg && (
@@ -217,22 +230,18 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
         {depositHook.state.status !== "idle" && (
           <TxStatusRow state={depositHook.state} />
         )}
-        <p className="text-xs text-stone-400 mt-1">
-          USDC approve → deposit 순서로 두 번의 지갑 승인이 필요합니다.
-        </p>
+        <p className="text-xs text-stone-400 mt-1">{t("deposit_approve_note")}</p>
       </div>
 
-      {/* 예산 이체 카드 (관리자 전용) */}
+      {/* Budget transfer card (admin only) */}
       {isAdmin && (
         <div className="bg-white rounded-xl border border-stone-200 p-4">
           <div className="flex items-center gap-2 mb-1">
-            <h3 className="text-sm font-semibold text-stone-700">결제용 예산 이체</h3>
-            <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">관리자 전용</span>
+            <h3 className="text-sm font-semibold text-stone-700">{t("budget_transfer_title")}</h3>
+            <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">{t("admin_only_badge")}</span>
           </div>
           <p className="text-xs text-stone-400 mb-3">
-            공동자금을 결제자의 외부 지갑으로 이체합니다.
-            이 이체는 <strong>여행 지출로 계산되지 않으며</strong> allocatedBudget에 기록됩니다.
-            결제자는 실제 외부 지출 후 사용 금액을 별도 기록해야 합니다.
+            {t("budget_transfer_desc")} {t("budget_transfer_note")}
           </p>
           <div className="space-y-2">
             <div className="flex gap-2">
@@ -243,7 +252,7 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
               >
                 {trip.participants.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name} (보유: {fmtUsdc(p.allocatedBudget)} USDC)
+                    {p.name} ({t("balance_label")}: {fmtUsdc(p.allocatedBudget)} USDC)
                   </option>
                 ))}
               </select>
@@ -252,7 +261,7 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
                 min="0"
                 step="0.000001"
                 className="w-28 border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                placeholder="금액"
+                placeholder={t("amount_placeholder")}
                 value={releaseInput}
                 onChange={(e) => { setReleaseInput(e.target.value); setReleaseMsg(""); releaseHook.reset(); }}
               />
@@ -261,17 +270,17 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
               <input
                 type="text"
                 className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                placeholder="메모 (예: 호텔 선결제)"
+                placeholder={t("memo_placeholder")}
                 value={releaseMemo}
                 onChange={(e) => setReleaseMemo(e.target.value)}
               />
               <button
                 onClick={() => { void handleRelease(); }}
                 disabled={releaseHook.state.status === "pending" || !!isWrongChain}
-                title={isWrongChain ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+                title={isWrongChain ? t("switch_chain_title") : undefined}
                 className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                이체
+                {releaseHook.state.status === "pending" ? t("transferring") : t("transfer_btn")}
               </button>
             </div>
           </div>
@@ -284,11 +293,11 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
       {(me?.allocatedBudget ?? 0n) > 0n && (
         <div className="rounded-xl border p-4 bg-amber-50 border-amber-200">
           <div className="flex items-center gap-2 mb-1">
-            <h3 className="text-sm font-semibold text-amber-800">미반납 결제예산 반납</h3>
+            <h3 className="text-sm font-semibold text-amber-800">{t("return_budget_title")}</h3>
           </div>
           <p className="text-xs text-amber-600 mb-3">
-            내 외부 결제지갑에 공동자금 <strong>{fmtUsdc(me.allocatedBudget)} USDC</strong>가 있습니다.
-            실제 사용: {fmtUsdc(me.spentFromBudget)} USDC · 미사용 추정: {fmtUsdc(me.allocatedBudget - me.spentFromBudget)} USDC
+            {t("return_budget_desc_prefix")} <strong>{fmtUsdc(me.allocatedBudget)} USDC</strong>.
+            {t("return_budget_desc_actual")}: {fmtUsdc(me.spentFromBudget)} USDC · {t("return_budget_desc_unused")}: {fmtUsdc(me.allocatedBudget - me.spentFromBudget)} USDC
           </p>
           <div className="flex gap-2">
             <input
@@ -296,24 +305,22 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
               min="0"
               step="0.000001"
               className="flex-1 border border-amber-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-300 bg-white"
-              placeholder="반납 금액"
+              placeholder={t("return_amount_placeholder")}
               value={returnInput}
               onChange={(e) => { setReturnInput(e.target.value); setReturnMsg(""); returnHook.reset(); }}
             />
             <button
               onClick={() => { void handleReturn(); }}
               disabled={returnHook.state.status === "pending" || !!isWrongChain}
-              title={isWrongChain ? "Arc Testnet (5042002)으로 전환해야 합니다" : undefined}
+              title={isWrongChain ? t("switch_chain_title") : undefined}
               className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              반납
+              {returnHook.state.status === "pending" ? t("returning") : t("return_btn")}
             </button>
           </div>
           {returnMsg && <p className="text-xs mt-1.5 text-rose-600">{returnMsg}</p>}
           {returnHook.state.status !== "idle" && <TxStatusRow state={returnHook.state} />}
-          <p className="text-xs text-amber-600 mt-1">
-            USDC approve → returnUnusedBudget 순서로 두 번의 지갑 승인이 필요합니다.
-          </p>
+          <p className="text-xs text-amber-600 mt-1">{t("return_approve_note")}</p>
         </div>
       )}
     </div>

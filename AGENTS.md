@@ -17,18 +17,23 @@ MoaArc: 여행 일정을 관리하고 공동경비를 Arc Testnet에서 정산�
 |---|---|---|---|
 | TripSharedTreasury (V1) | Arc Testnet | 0x0e540064015628b03ec62b44d94721b1b50e5d92 | Superseded |
 | TripSharedTreasuryV2 | Arc Testnet | 0x3bc08cdabcf702e01b458923a946cd664e438c3e | Superseded |
-| **MoaArcTreasury** | **Arc Testnet** | **0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3** | **Active** |
+| MoaArcTreasury v2 | Arc Testnet | 0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3 | Superseded (existing trips remain here) |
+| **MoaArcTreasury v3** | **Arc Testnet** | **0xf7a733fb2084b31591a0fbacded683efbe5b6728** | **Active** |
 
-MoaArcTreasury Explorer: https://explorer.testnet.arc.io/address/0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3
-MoaArcTreasury Deploy Tx: 0x3a9bd689e22fdf2a6fba1ffc569535aae21000b7cb465d8c1a54d7378155dc43
+MoaArcTreasury v3 Explorer: https://explorer.testnet.arc.io/address/0xf7a733fb2084b31591a0fbacded683efbe5b6728
+MoaArcTreasury v3 Deploy Tx: 0xaa69a1a89b775873ba20bd60f81b6e99df1ebf55f1119b7fae180d4f304dc0ac
+
+MoaArcTreasury v2 Explorer (legacy): https://explorer.testnet.arc.io/address/0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3
+MoaArcTreasury v2 Deploy Tx (legacy): 0x3a9bd689e22fdf2a6fba1ffc569535aae21000b7cb465d8c1a54d7378155dc43
 
 Constructor args: `["0x3600000000000000000000000000000000000000"]` (Arc USDC)
 
-### MoaArcTreasury vs V2
-- Contract name: `MoaArcTreasury` (VERSION = "MoaArc-1.0")
-- proposeFinalSettlement blocked after DeficitPaying/ClaimStarted status (prevents silent hash replacement)
-- Emits VersionInfo event in constructor
-- All V2 features retained: SettlementStatus machine, per-trip balance isolation, on-chain hash derivation, MAX_PARTICIPANTS=50 cap, per-claim balance check
+### MoaArcTreasury v3 changes (vs v2)
+- VERSION = "MoaArc-3.0"
+- New function: `addParticipant(uint256 tripId, address newParticipant)` — admin-only, allowed only when settlementStatus==None and not locked
+- New error: `ContractAddress(address addr)` — rejects smart-contract wallets (extcodesize check); known limitation documented in NatSpec
+- New event: `ParticipantAdded(uint256 indexed tripId, address indexed newParticipant)`
+- All other functions and storage layout unchanged
 
 ## App Modes
 
