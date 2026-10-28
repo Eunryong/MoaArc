@@ -36,6 +36,7 @@ import auth from "./routes/auth.js";
 import trips from "./routes/trips.js";
 import agent from "./routes/agent.js";
 import intent from "./routes/intent.js";
+import { verifyServerNetworkConfig, ACTIVE_CHAIN_ID } from "./lib/chain.js";
 
 const app = new Hono();
 
@@ -131,31 +132,27 @@ app.onError((err, c) => {
   return c.json({ error: msg }, 500);
 });
 
-// ─── STUDIO_TEST_MODE 안전 가드 ──────────────────────────────────────────────
-if (process.env.STUDIO_TEST_MODE === "1") {
-  if (process.env.NODE_ENV === "production") {
-    console.error(
-      "[FATAL] STUDIO_TEST_MODE=1 is set in a production environment. " +
-      "This mode bypasses authentication and must never run in production. Exiting."
-    );
-    process.exit(1);
-  }
-  console.warn(
-    "\n" +
-    "╔══════════════════════════════════════════════════════════════╗\n" +
-    "║  ⚠  INSECURE TEST MODE: 인증 우회 활성                      ║\n" +
-    "║     Arc Testnet 합성 데이터 전용 — 실제 자금 사용 금지       ║\n" +
-    "║     메인넷/외부 배포 전 반드시 제거하세요                     ║\n" +
-    "║     docs/STUDIO_TEST_MODE.md 참고                            ║\n" +
-    "╚══════════════════════════════════════════════════════════════╝\n"
-  );
-}
 
 // ─── 서버 시작 ────────────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== "test") {
   const port = Number(process.env.PORT ?? 3001);
   console.log(`MoaArc API Server listening on port ${port}`);
   serve({ fetch: app.fetch, port });
+
+  // 비동기 네트워크 설정 검증 (서버 실행 차단 안 함)
+  verifyServerNetworkConfig().then((result) => {
+    if (result.ok) {
+      console.log(
+        `[chain] network OK — chainId=${result.chainId} version=${result.version} usdcDecimals=${result.usdcDecimals}`
+      );
+    } else {
+      // 오류가 있어도 서버를 종료하지 않음 (read-only 기능 유지).
+      // 프런트엔드의 ACTIVE_CHAIN_ID 불일치는 write 훅이 차단합니다.
+      console.warn(`[chain] network config mismatch (chainId expected=${ACTIVE_CHAIN_ID}):`, result.errors);
+    }
+  }).catch((e: unknown) => {
+    console.warn("[chain] network verification failed:", String(e));
+  });
 }
 
 export default app;

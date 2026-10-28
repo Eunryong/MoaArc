@@ -4,26 +4,32 @@
 // DEMO 모드에서는 호출하지 마세요.
 
 import { useReadContract, useReadContracts } from "wagmi";
-import { arcTestnet } from "viem/chains";
 import {
-  MOAARK_ADDRESS,
   MOAARK_ABI,
   ERC20_ABI,
-  USDC_ADDRESS,
   settlementStatusFromUint,
 } from "./contractAbi";
+import { NETWORK_CONFIG } from "./networkConfig";
 import type { SettlementStatus } from "./types";
+
+// 편의 상수 — networkConfig를 읽어 사용
+const MOAARK_ADDRESS = NETWORK_CONFIG.contractAddress;
+const USDC_ADDRESS   = NETWORK_CONFIG.usdcAddress;
+const CHAIN_ID       = NETWORK_CONFIG.chainId;
+
+import { isLegacyTrip } from "./useContractWrite";
 
 // ─── tripBalance 읽기 ────────────────────────────────────────────────────
 
-export function useTripBalance(tripId: bigint, enabled = true) {
+export function useTripBalance(tripId: bigint, enabled = true, tripContractAddress?: string) {
+  const active = enabled && !isLegacyTrip(tripContractAddress);
   return useReadContract({
     address: MOAARK_ADDRESS,
     abi: MOAARK_ABI,
     functionName: "tripBalance",
     args: [tripId],
-    chainId: arcTestnet.id,
-    query: { enabled, refetchInterval: 15_000 },
+    chainId: CHAIN_ID,
+    query: { enabled: active, refetchInterval: 15_000 },
   });
 }
 
@@ -32,15 +38,17 @@ export function useTripBalance(tripId: bigint, enabled = true) {
 export function useDepositedAmount(
   tripId: bigint,
   participantAddress: `0x${string}` | undefined,
-  enabled = true
+  enabled = true,
+  tripContractAddress?: string
 ) {
+  const active = enabled && !!participantAddress && !isLegacyTrip(tripContractAddress);
   return useReadContract({
     address: MOAARK_ADDRESS,
     abi: MOAARK_ABI,
     functionName: "depositedAmount",
     args: [tripId, participantAddress ?? "0x0000000000000000000000000000000000000000"],
-    chainId: arcTestnet.id,
-    query: { enabled: enabled && !!participantAddress, refetchInterval: 15_000 },
+    chainId: CHAIN_ID,
+    query: { enabled: active, refetchInterval: 15_000 },
   });
 }
 
@@ -56,7 +64,7 @@ export function useAllocatedBudget(
     abi: MOAARK_ABI,
     functionName: "allocatedBudget",
     args: [tripId, participantAddress ?? "0x0000000000000000000000000000000000000000"],
-    chainId: arcTestnet.id,
+    chainId: CHAIN_ID,
     query: { enabled: enabled && !!participantAddress, refetchInterval: 15_000 },
   });
 }
@@ -73,21 +81,22 @@ export function useIsParticipant(
     abi: MOAARK_ABI,
     functionName: "isParticipant",
     args: [tripId, address ?? "0x0000000000000000000000000000000000000000"],
-    chainId: arcTestnet.id,
+    chainId: CHAIN_ID,
     query: { enabled: enabled && !!address, refetchInterval: 15_000 },
   });
 }
 
 // ─── settlementStatus 읽기 ───────────────────────────────────────────────
 
-export function useSettlementStatus(tripId: bigint, enabled = true) {
+export function useSettlementStatus(tripId: bigint, enabled = true, tripContractAddress?: string) {
+  const active = enabled && !isLegacyTrip(tripContractAddress);
   const result = useReadContract({
     address: MOAARK_ADDRESS,
     abi: MOAARK_ABI,
     functionName: "getSettlementStatus",
     args: [tripId],
-    chainId: arcTestnet.id,
-    query: { enabled, refetchInterval: 15_000 },
+    chainId: CHAIN_ID,
+    query: { enabled: active, refetchInterval: 15_000 },
   });
   const status: SettlementStatus | undefined =
     result.data !== undefined ? settlementStatusFromUint(result.data) : undefined;
@@ -105,7 +114,7 @@ export function useUsdcBalance(
     abi: ERC20_ABI,
     functionName: "balanceOf",
     args: [address ?? "0x0000000000000000000000000000000000000000"],
-    chainId: arcTestnet.id,
+    chainId: CHAIN_ID,
     query: { enabled: enabled && !!address, refetchInterval: 15_000 },
   });
 }
@@ -124,7 +133,7 @@ export function useUsdcAllowance(
       owner ?? "0x0000000000000000000000000000000000000000",
       MOAARK_ADDRESS,
     ],
-    chainId: arcTestnet.id,
+    chainId: CHAIN_ID,
     query: { enabled: enabled && !!owner, refetchInterval: 15_000 },
   });
 }
@@ -141,7 +150,7 @@ export function useRefundClaimed(
     abi: MOAARK_ABI,
     functionName: "refundClaimed",
     args: [tripId, address ?? "0x0000000000000000000000000000000000000000"],
-    chainId: arcTestnet.id,
+    chainId: CHAIN_ID,
     query: { enabled: enabled && !!address, refetchInterval: 15_000 },
   });
 }
@@ -154,7 +163,7 @@ export function useSettlementDetails(tripId: bigint, enabled = true) {
     abi: MOAARK_ABI,
     functionName: "getSettlementDetails",
     args: [tripId],
-    chainId: arcTestnet.id,
+    chainId: CHAIN_ID,
     query: { enabled, refetchInterval: 15_000 },
   });
 }
@@ -169,14 +178,14 @@ export function useSettlementReadiness(tripId: bigint, enabled = true) {
         abi: MOAARK_ABI,
         functionName: "isAllApproved",
         args: [tripId],
-        chainId: arcTestnet.id,
+        chainId: CHAIN_ID,
       },
       {
         address: MOAARK_ADDRESS,
         abi: MOAARK_ABI,
         functionName: "isAllDeficitPaid",
         args: [tripId],
-        chainId: arcTestnet.id,
+        chainId: CHAIN_ID,
       },
     ],
     query: { enabled, refetchInterval: 15_000 },
@@ -195,7 +204,7 @@ export function usePaidDeficit(
     abi: MOAARK_ABI,
     functionName: "paidDeficit",
     args: [tripId, address ?? "0x0000000000000000000000000000000000000000"],
-    chainId: arcTestnet.id,
+    chainId: CHAIN_ID,
     query: { enabled: enabled && !!address, refetchInterval: 15_000 },
   });
 }

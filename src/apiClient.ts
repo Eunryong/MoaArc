@@ -19,23 +19,6 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 const TOKEN_KEY = "moaarc_auth_token";
 
-/**
- * [STUDIO_TEST_MODE] Arc Studio 프리뷰 전용 인증 우회.
- * import.meta.env.DEV && VITE_STUDIO_TEST_MODE==="1" 일 때만 활성.
- * 보호 API 요청 URL에 ?as=<address> 를 추가해 서버 인증을 우회합니다.
- * 프로덕션 배포 전 반드시 제거 — docs/STUDIO_TEST_MODE.md 참고.
- */
-export const STUDIO_TEST_MODE =
-  import.meta.env.DEV === true &&
-  import.meta.env.VITE_STUDIO_TEST_MODE === "1";
-
-let _studioTestAddress: string | null = null;
-export function setStudioTestAddress(addr: string | null) {
-  _studioTestAddress = addr;
-}
-export function getStudioTestAddress(): string | null {
-  return _studioTestAddress;
-}
 
 // ─── 토큰 관리 ────────────────────────────────────────────────────────────────
 // 토큰은 localStorage에만 보관합니다.
@@ -76,21 +59,17 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   let fetchUrl: string;
   let fetchInit: RequestInit;
 
-  // [STUDIO_TEST_MODE] 보호 API에 ?as=<address> 쿼리 추가
-  const studioAs = STUDIO_TEST_MODE ? _studioTestAddress : null;
-
+  // GET 터널: Arc Studio 프리뷰 게이트웨이가 POST/PATCH/DELETE를 403으로 차단합니다.
+  // 변경 메서드는 GET ?_method=POST&_body=<base64(body)> 로 터널링합니다.
   if (isMutating) {
     const base = `${API_BASE}${path}`;
     const params = new URLSearchParams();
     params.set("_method", method);
     if (init?.body) params.set("_body", btoa(unescape(encodeURIComponent(typeof init.body === "string" ? init.body : JSON.stringify(init.body)))));
-    if (studioAs) params.set("as", studioAs);
     fetchUrl = `${base}${base.includes("?") ? "&" : "?"}${params.toString()}`;
     fetchInit = { headers };
   } else {
-    const base = `${API_BASE}${path}`;
-    const sep = base.includes("?") ? "&" : "?";
-    fetchUrl = studioAs ? `${base}${sep}as=${encodeURIComponent(studioAs)}` : base;
+    fetchUrl = `${API_BASE}${path}`;
     fetchInit = { ...init, headers };
   }
 
@@ -100,7 +79,7 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
   // 401이라도 서버가 JSON을 반환할 수 있으므로 Content-Type 체크를 우선합니다.
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) {
-    const text = await res.text();
+    await res.text(); // body 소비 (unused)
     if (res.status === 401) {
       // JSON이 아닌 401 — 게이트웨이/프록시 오류. 토큰 미삭제, 재시도 가능.
       throw new ApiError(401, `게이트웨이 오류 (HTTP 401)`);
@@ -230,6 +209,23 @@ export async function listMyTripsWithToken(token: string): Promise<TripApiRecord
 
 export async function getTripById(dbTripId: string): Promise<TripApiRecord> {
   const data = await apiFetch<{ trip: TripApiRecord }>(`/api/trips/${dbTripId}`);
+  return data.trip;
+}
+
+export async function addTripParticipant(
+  dbTripId: string,
+  payload: {
+    txHash: string;
+    chainId: number;
+    contractAddress: string;
+    newParticipantAddress: string;
+    displayName?: string;
+  }
+): Promise<TripApiRecord> {
+  const data = await apiFetch<{ trip: TripApiRecord }>(
+    `/api/trips/${dbTripId}/participants`,
+    { method: "POST", body: JSON.stringify(payload) }
+  );
   return data.trip;
 }
 

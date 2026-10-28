@@ -22,6 +22,7 @@ import { Toaster } from 'sonner'
 import { config } from './config'
 import App from './App'
 import { I18nProvider } from './i18n'
+import { ErrorBoundary } from './ErrorBoundary'
 import './index.css'
 
 const queryClient = new QueryClient()
@@ -69,17 +70,19 @@ const StudioWatermark = () => (
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <WagmiProvider config={config}>
-      <QueryClientProvider client={queryClient}>
-        <ConnectKitProvider>
-          <I18nProvider>
-            <App />
-            <StudioWatermark />
-            <Toaster position="top-center" />
-          </I18nProvider>
-        </ConnectKitProvider>
-      </QueryClientProvider>
-    </WagmiProvider>
+    <ErrorBoundary>
+      <WagmiProvider config={config}>
+        <QueryClientProvider client={queryClient}>
+          <ConnectKitProvider>
+            <I18nProvider>
+              <App />
+              <StudioWatermark />
+              <Toaster position="top-center" />
+            </I18nProvider>
+          </ConnectKitProvider>
+        </QueryClientProvider>
+      </WagmiProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )
 

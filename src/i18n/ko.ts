@@ -194,6 +194,11 @@ const ko: Record<I18nKeys, string> = {
   accept_draft: "일정에 추가",
   reject_draft: "무시",
 
+  err_title_required: "제목을 입력해주세요.",
+  err_date_invalid: "날짜 형식이 올바르지 않습니다 (YYYY-MM-DD).",
+  err_amount_required: "0보다 큰 금액을 입력해주세요.",
+  err_no_participants: "분담 대상을 한 명 이상 선택해주세요.",
+  err_split_mismatch: "분담 합계({sum} USDC)가 총액({total} USDC)과 일치하지 않습니다.",
   err_400: "입력값이 올바르지 않습니다. 다시 확인해주세요.",
   err_401: "세션이 만료됐습니다. 다시 로그인해주세요.",
   err_403: "이 작업을 수행할 권한이 없습니다.",
@@ -306,6 +311,14 @@ const ko: Record<I18nKeys, string> = {
   add_participant_btn: "참여자 추가",
 
   footer_disclaimer: "MoaArc는 Arc Testnet에서 실행됩니다. 모든 거래는 테스트 USDC를 사용하며 실제 금전적 가치가 없습니다.",
+  // 참여자 추가 오류
+  err_invalid_address: "유효한 0x 주소(42자)를 입력하세요.",
+  err_max_participants: "최대 {{max}}명까지 참여할 수 있습니다.",
+  err_no_slot: "빈 슬롯(A-D)이 없습니다.",
+  err_db_sync_retry: "온체인 성공 — DB 동기화 실패. 다시 시도하세요",
+  // 레거시 방
+  legacy_trip_banner: "이 여행방은 이전 버전 컨트랙트를 사용합니다. 입금·이체·참여자 추가 등 쓰기 기능은 비활성화됩니다.",
+  legacy_trip_badge: "레거시 방 (읽기 전용)",
 };
 
 export default ko;

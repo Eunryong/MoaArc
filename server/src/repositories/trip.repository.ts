@@ -24,7 +24,7 @@ export async function findTripById(id: string) {
 
 export async function findTripByOnchain(chainId: number, contractAddress: string, onchainTripId: string) {
   return prisma.tripRecord.findFirst({
-    where: { chainId, contractAddress: contractAddress.toLowerCase(), onchainTripId },
+    where: { chainId, contractAddress: contractAddress.toLowerCase(), onchainTripId: BigInt(onchainTripId) },
   });
 }
 
@@ -41,7 +41,7 @@ export async function createTrip(data: {
     data: {
       chainId: data.chainId,
       contractAddress: data.contractAddress.toLowerCase(),
-      onchainTripId: data.onchainTripId,
+      onchainTripId: BigInt(data.onchainTripId),
       name: data.name,
       adminAddress: data.adminAddress,
       createTxHash: data.createTxHash.toLowerCase(),
@@ -55,6 +55,55 @@ export async function createTrip(data: {
 
 export async function findParticipant(tripId: string, address: string) {
   return prisma.participantRecord.findFirst({ where: { tripId, address } });
+}
+
+/** findParticipant의 별칭 — addTripParticipant 컨트롤러에서 사용 */
+export const findParticipantByAddress = findParticipant;
+
+export async function createParticipant(data: {
+  tripId: string;
+  address: string;
+  displayName: string;
+  isAdmin: boolean;
+}) {
+  return prisma.participantRecord.create({
+    data: {
+      tripId: data.tripId,
+      address: data.address.toLowerCase(),
+      displayName: data.displayName,
+      isAdmin: data.isAdmin,
+    },
+  });
+}
+
+/**
+ * 4인 제한 초과 방지를 DB 트랜잭션으로 직렬화합니다.
+ * 동시 추가 요청이 제한을 초과하면 "MAX_PARTICIPANTS" 메시지로 throw합니다.
+ */
+export async function addParticipantAtomic(data: {
+  tripId: string;
+  address: string;
+  displayName: string;
+  maxParticipants: number;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const count = await tx.participantRecord.count({ where: { tripId: data.tripId } });
+    if (count >= data.maxParticipants) {
+      throw new Error(`MAX_PARTICIPANTS: ${count} >= ${data.maxParticipants}`);
+    }
+    await tx.participantRecord.create({
+      data: {
+        tripId: data.tripId,
+        address: data.address.toLowerCase(),
+        displayName: data.displayName,
+        isAdmin: false,
+      },
+    });
+    return tx.tripRecord.findUnique({
+      where: { id: data.tripId },
+      include: { participants: true },
+    });
+  });
 }
 
 export async function findParticipantsByTrip(tripId: string) {
@@ -102,7 +151,8 @@ export async function updateItineraryItem(
   itemId: string,
   patch: Partial<{
     date: string; time: string | null; location: string; activity: string;
-    participants: string[]; notes: string | null; status: string;
+    participants: string;  // JSON string of address[]
+    notes: string | null; status: string;
     estMinUsdc: bigint; estMaxUsdc: bigint; estCurrency: string;
     estSource: string; confidence: string; estAt: Date;
   }>
@@ -231,6 +281,53 @@ export async function upsertExpenseApproval(data: {
 
 export async function findAllApprovals(versionId: string) {
   return prisma.expenseApproval.findMany({ where: { versionId } });
+}
+
+/**
+ * 전원 승인 판정 및 확정 전환.
+ *
+ * "전원"의 기준은 해당 버전의 shares에 포함된 지갑 주소(분담 대상자)입니다.
+ * 방 참여자 전체가 아니라 이 버전의 분담 대상자 전원이 "승인" 레코드를 가질 때만 확정합니다.
+ *
+ * 엣지 케이스:
+ *  - shares가 비어 있으면(분담 대상자 0명) 확정하지 않고 false를 반환합니다.
+ *    분담 대상자가 없는 지출은 정상적으로 의미가 없으므로 안전한 기본값입니다.
+ *
+ * 반환값: true = 확정으로 전환됨, false = 아직 미확정(또는 이미 확정·취소)
+ */
+export async function checkAndConfirmExpense(
+  expenseId: string,
+  versionId: string,
+  sharesJson: string,
+): Promise<boolean> {
+  // shares JSON 파싱 — 분담 대상 주소 목록 추출
+  let shareAddresses: string[];
+  try {
+    const parsed = JSON.parse(sharesJson) as { address: string }[];
+    shareAddresses = parsed.map((s) => s.address.toLowerCase());
+  } catch {
+    return false;
+  }
+
+  // 분담 대상자가 0명이면 확정하지 않음
+  if (shareAddresses.length === 0) return false;
+
+  // 해당 버전의 모든 승인 레코드 조회
+  const approvals = await prisma.expenseApproval.findMany({ where: { versionId } });
+  const approvedSet = new Set(
+    approvals.filter((a) => a.action === "승인").map((a) => a.address.toLowerCase()),
+  );
+
+  // 분담 대상자 전원이 승인했는지 확인
+  const allApproved = shareAddresses.every((addr) => approvedSet.has(addr));
+  if (!allApproved) return false;
+
+  // 두 테이블 모두 "확정"으로 업데이트
+  await prisma.$transaction([
+    prisma.expenseVersion.update({ where: { id: versionId }, data: { status: "확정" } }),
+    prisma.expenseRecord.update({ where: { id: expenseId }, data: { status: "확정" } }),
+  ]);
+  return true;
 }
 
 // ─── 알림 ─────────────────────────────────────────────────────────────────────

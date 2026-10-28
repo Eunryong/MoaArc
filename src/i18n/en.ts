@@ -207,6 +207,12 @@ const en = {
   reject_draft: "Dismiss",
 
   // ── Error messages (by status code) ─────────────────────────────
+  // Field-specific validation errors (client-side only)
+  err_title_required: "Title is required.",
+  err_date_invalid: "Date must be in YYYY-MM-DD format.",
+  err_amount_required: "Enter an amount greater than 0.",
+  err_no_participants: "Select at least one participant.",
+  err_split_mismatch: "Split total ({sum} USDC) does not match expense total ({total} USDC).",
   err_400: "Invalid input. Please check your data.",
   err_401: "Session expired. Please sign in again.",
   err_403: "You do not have permission for this action.",
@@ -326,6 +332,14 @@ const en = {
 
   // ── Footer ───────────────────────────────────────────────────────
   footer_disclaimer: "MoaArc runs on Arc Testnet. All transactions use test USDC and have no real monetary value.",
+  // add participant errors
+  err_invalid_address: "Enter a valid 0x address (42 characters).",
+  err_max_participants: "Maximum {{max}} participants allowed.",
+  err_no_slot: "No empty slot (A-D) available.",
+  err_db_sync_retry: "Onchain success — DB sync failed. Please retry",
+  // legacy trip
+  legacy_trip_banner: "This trip uses an older contract. Deposit, transfer, and add-participant actions are disabled.",
+  legacy_trip_badge: "Legacy trip (read-only)",
 } as const;
 
 export type I18nKeys = keyof typeof en;

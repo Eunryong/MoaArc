@@ -19,8 +19,6 @@ import {
   fetchNonce,
   verifySignature,
   clearToken,
-  STUDIO_TEST_MODE,
-  setStudioTestAddress,
   type TripApiRecord,
 } from "./apiClient";
 import TopSummaryBar from "./components/TopSummaryBar";
@@ -93,11 +91,6 @@ export default function App() {
   // ─── 서버 상태 ─────────────────────────────────────────────────────────
   const { serverOnline, geminiConfigured, checking: serverChecking } = useServerHealth();
   const { isAuthenticated, isExpired, refresh: refreshAuth, markExpired } = useAuthState(address);
-
-  // [STUDIO_TEST_MODE] 지갑 주소를 apiClient에 동기화
-  useEffect(() => {
-    if (STUDIO_TEST_MODE) setStudioTestAddress(address ?? null);
-  }, [address]);
 
   // ─── 여행방 목록 ───────────────────────────────────────────────────────
   // 서버 온라인 + 인증됨일 때만 활성화. 401 발생 시 markExpired 호출
@@ -383,14 +376,6 @@ export default function App() {
               <ConnectKitButton />
             </div>
           </div>
-
-          {/* [STUDIO_TEST_MODE] 인증 우회 배지 */}
-          {STUDIO_TEST_MODE && (
-            <div className="mb-2 bg-yellow-100 border border-yellow-400 rounded-lg px-3 py-1.5 text-xs font-bold text-yellow-800 flex items-center gap-2">
-              <span>⚠️ {t("test_mode_badge")}: server auth bypass (Studio only)</span>
-              <span className="font-normal text-yellow-700">— no real funds, no mainnet</span>
-            </div>
-          )}
 
           {/* 체인 경고 — 잘못된 체인이면 이 배너만 표시하고 인증 UI는 숨김 */}
           {isWrongChain && (
@@ -709,8 +694,10 @@ export default function App() {
         {trip && activeTab === "dashboard" && (
           <DashboardTab
             trip={trip}
+            dbTripId={selectedDbTripId ?? ""}
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
+            onParticipantAdded={reloadTrips}
             connectedAddress={address}
             isWrongChain={isWrongChain}
           />

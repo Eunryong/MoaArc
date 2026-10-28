@@ -39,26 +39,26 @@ type Middleware = (c: Context, next: Next)  => Promise<Response | void>;
 
 function ifTunnel(expectedMethod: string, ...chain: (Handler | Middleware)[]) {
   return async (c: Context, next: Next): Promise<Response | void> => {
-    // c.set/get의 "as never" 캐스팅이 런타임에서 불안정하므로
-    // req.query()로 직접 읽는 방식을 사용합니다.
     const tm = c.req.query("_method")?.toUpperCase();
     if (tm !== expectedMethod) {
       return next();
     }
-    // chain을 순차 실행. middleware는 next 콜백으로 다음 step을 호출하고,
-    // terminal handler는 Response를 반환해서 체인을 종료합니다.
     let idx = 0;
-    const dispatch = async (): Promise<Response | void> => {
+    // dispatch must match Hono Next signature: () => Promise<void>
+    const dispatch: Next = async (): Promise<void> => {
       if (idx >= chain.length) return;
       const fn = chain[idx++];
       if (fn.length >= 2) {
-        // middleware signature: (c, next)
-        return (fn as Middleware)(c, dispatch);
+        await (fn as Middleware)(c, dispatch);
+      } else {
+        const res = await (fn as Handler)(c);
+        // Store response so Hono can send it
+        if (res instanceof Response) c.res = res;
       }
-      // terminal handler signature: (c)
-      return (fn as Handler)(c);
     };
-    return dispatch();
+    await dispatch();
+    // Return c.res if set by a terminal handler
+    return c.res instanceof Response ? c.res : undefined;
   };
 }
 
@@ -98,6 +98,16 @@ trips.get( "/:dbTripId/expenses/:expenseId/approve",
   async (c) => c.json({ error: "Not found" }, 404),
 );
 trips.post("/:dbTripId/expenses/:expenseId/approve",     requireAuth, requireParticipant, ctrl.approveExpense);
+
+// ─── 참여자 추가 ─────────────────────────────────────────────────────────────
+// POST  /:dbTripId/participants        — 관리자 전용, onchain 검증 후 DB upsert
+// GET 터널: GET /:dbTripId/participants?_method=POST
+trips.get("/:dbTripId/participants",
+  requireAuth, requireParticipant,
+  ifTunnel("POST", requireAdmin, ctrl.addTripParticipant),
+  async (c) => c.json({ error: "Not found" }, 404),
+);
+trips.post("/:dbTripId/participants", requireAuth, requireParticipant, requireAdmin, ctrl.addTripParticipant);
 
 // ─── 알림 ─────────────────────────────────────────────────────────────────────
 trips.get( "/:dbTripId/notifications",                   requireAuth, requireParticipant, ctrl.getNotifications);

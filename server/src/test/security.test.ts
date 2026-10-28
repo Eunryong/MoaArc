@@ -417,7 +417,7 @@ describe("Nonce — 원자적 소비 및 재사용 방지 (DB 조건 직접 검�
     });
     // nonce 존재 여부와 used 상태만 검증 — 값은 assertion 메시지에 미포함
     expect(nonceRecord).not.toBeNull();
-    expect(nonceRecord.used).toBe(false);
+    expect(nonceRecord!.used).toBe(false);
   });
 });
 
@@ -629,19 +629,156 @@ describe("STUDIO_TEST_MODE — 플래그 꺼짐 시 as= 쿼리 무시", () => {
   });
 
   test("production + STUDIO_TEST_MODE=1 조합 시 process.exit(1) 호출 (모킹)", async () => {
-    // 실제 process.exit을 호출하면 테스트 프로세스가 종료되므로
-    // index.ts의 가드 로직을 직접 검증합니다.
     const isProductionTestMode =
       process.env.STUDIO_TEST_MODE === "1" &&
       process.env.NODE_ENV === "production";
-    // 현재 테스트 환경: NODE_ENV=test이므로 이 조건은 항상 false여야 합니다.
     expect(isProductionTestMode).toBe(false);
-    // 가드 로직 재현: production + 플래그 켜짐이면 exit(1)임을 assert
     const wouldExit = (mode: string, env: string) =>
       mode === "1" && env === "production";
     expect(wouldExit("1", "production")).toBe(true);
     expect(wouldExit("1", "test")).toBe(false);
     expect(wouldExit("0", "production")).toBe(false);
     expect(wouldExit(undefined as unknown as string, "production")).toBe(false);
+  });
+});
+
+// ─── 9. STUDIO_TEST_MODE 완전 제거 — Bearer 인증만 허용 ─────────────────────
+
+describe("STUDIO_TEST_MODE 제거: Bearer 이외의 인증 수단 모두 거부", () => {
+  test("?as= 쿼리 파라미터로는 인증 불가 → 401", async () => {
+    const res = await app.request(
+      `/api/trips/${aliceTrip.id}/expenses?as=${TEST_ADDRESSES.alice}`
+    );
+    expect(res.status).toBe(401);
+  });
+
+  test("?_t= 쿼리로 인증 불가 → 401", async () => {
+    const res = await app.request(
+      `/api/trips/${aliceTrip.id}/expenses?_t=something`
+    );
+    expect(res.status).toBe(401);
+  });
+
+  test("STUDIO_TEST_MODE 환경변수로 인증 불가 — API 레이어에서 거부", async () => {
+    // STUDIO_TEST_MODE 없이 Bearer도 없으면 항상 401이어야 함
+    const savedMode = process.env.STUDIO_TEST_MODE;
+    process.env.STUDIO_TEST_MODE = "1";
+    try {
+      const res = await app.request(`/api/trips/${aliceTrip.id}/expenses`);
+      expect(res.status).toBe(401);
+    } finally {
+      if (savedMode === undefined) delete process.env.STUDIO_TEST_MODE;
+      else process.env.STUDIO_TEST_MODE = savedMode;
+    }
+  });
+});
+
+// ─── 10. addParticipant 전용 보안/멱등성 테스트 ─────────────────────────────
+
+describe("addParticipant API 보안", () => {
+  test("비인증 → 401", async () => {
+    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        txHash: "0x" + "a".repeat(64),
+        chainId: 5042002,
+        contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+        newParticipantAddress: TEST_ADDRESSES.carol,
+        displayName: "Carol",
+      }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("비-admin(Bob)이 Alice 여행방에 참여자 추가 → 403", async () => {
+    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${bobToken}`,
+      },
+      body: JSON.stringify({
+        txHash: "0x" + "a".repeat(64),
+        chainId: 5042002,
+        contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+        newParticipantAddress: TEST_ADDRESSES.carol,
+        displayName: "Carol",
+      }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test("잘못된 주소 형식 → 400", async () => {
+    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${aliceToken}`,
+      },
+      body: JSON.stringify({
+        txHash: "0x" + "a".repeat(64),
+        chainId: 5042002,
+        contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+        newParticipantAddress: "not-an-address",
+        displayName: "Bad",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("잘못된 txHash → 400", async () => {
+    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${aliceToken}`,
+      },
+      body: JSON.stringify({
+        txHash: "not-a-hash",
+        chainId: 5042002,
+        contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+        newParticipantAddress: TEST_ADDRESSES.carol,
+        displayName: "Carol",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("contractAddress 불일치 → 400", async () => {
+    // Alice trip의 contractAddress와 다른 값 전달
+    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${aliceToken}`,
+      },
+      body: JSON.stringify({
+        txHash: "0x" + "a".repeat(64),
+        chainId: 5042002,
+        contractAddress: "0x1111111111111111111111111111111111111111",
+        newParticipantAddress: TEST_ADDRESSES.carol,
+        displayName: "Carol",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("자기 자신(admin) 추가 시도 → 400", async () => {
+    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${aliceToken}`,
+      },
+      body: JSON.stringify({
+        txHash: "0x" + "a".repeat(64),
+        chainId: 5042002,
+        contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+        newParticipantAddress: TEST_ADDRESSES.alice,
+        displayName: "Alice",
+      }),
+    });
+    expect(res.status).toBe(400);
   });
 });

@@ -27,7 +27,7 @@ import {
   getTransactionStatus,
   verifyCreateTripTx,
   fetchOnchainParticipants,
-  ARC_TESTNET_CHAIN_ID,
+  ACTIVE_CHAIN_ID,
 } from "../lib/chain.js";
 import * as intentRepo from "../repositories/intent.repository.js";
 import * as tripRepo from "../repositories/trip.repository.js";
@@ -70,7 +70,7 @@ export async function prepareCreateTripIntent(c: Context) {
   if (budget < 0n) return c.json({ error: "targetBudget은 0 이상이어야 합니다." }, 400);
 
   const contractAddress = getMoarcContract();
-  const chainId = ARC_TESTNET_CHAIN_ID;
+  const chainId = ACTIVE_CHAIN_ID;
 
   // 생성자는 컨트랙트가 자동 추가 → participants에서 제외
   const otherParticipants = participantAddresses
@@ -105,7 +105,7 @@ export async function prepareCreateTripIntent(c: Context) {
 
 export async function submitIntentTxHash(c: Context) {
   const caller = c.get("callerAddress") as string;
-  const intentId = c.req.param("intentId");
+  const intentId = c.req.param("intentId") ?? "";
   const body = await parseBody<{ txHash: string }>(c);
 
   const { txHash } = body ?? {};
@@ -153,7 +153,7 @@ export async function submitIntentTxHash(c: Context) {
 
 export async function getIntentStatus(c: Context) {
   const caller = c.get("callerAddress") as string;
-  const intentId = c.req.param("intentId");
+  const intentId = c.req.param("intentId") ?? "";
 
   const intent = await intentRepo.findIntentById(intentId);
   if (!intent) return c.json({ error: "intent를 찾을 수 없습니다." }, 404);

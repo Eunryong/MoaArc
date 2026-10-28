@@ -14,10 +14,14 @@ import {
   useDeposit,
   useReleaseBudget,
   useReturnUnusedBudget,
+  useAddParticipant,
+  isLegacyTrip,
   txStatusLabel,
   txStatusColor,
   txExplorerUrl,
 } from "../useContractWrite";
+import { addTripParticipant } from "../apiClient";
+import { NETWORK_CONFIG } from "../networkConfig";
 import {
   useTripBalance,
   useDepositedAmount,
@@ -25,16 +29,20 @@ import {
   useSettlementStatus,
 } from "../useContractState";
 
+const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+
 interface Props {
   trip: Trip;
+  dbTripId: string;
   currentUserId: ParticipantId;
   onTripUpdate: (t: Trip) => void;
+  onParticipantAdded?: () => void;
   connectedAddress?: `0x${string}`;
   /** Arc Testnet이 아닌 체인에 연결됐을 때 true */
   isWrongChain?: boolean;
 }
 
-export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTripUpdate, connectedAddress, isWrongChain }: Props) {
+export default function DashboardTab({ trip, dbTripId, currentUserId, onTripUpdate: _onTripUpdate, onParticipantAdded, connectedAddress, isWrongChain }: Props) {
   const { t } = useI18n();
   const [depositInput, setDepositInput] = useState("");
   const [depositMsg, setDepositMsg] = useState("");
@@ -44,6 +52,10 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
   const [releaseMsg, setReleaseMsg] = useState("");
   const [returnInput, setReturnInput] = useState("");
   const [returnMsg, setReturnMsg] = useState("");
+  // ─── 참여자 추가 상태 ──────────────────────────────────────────────────
+  const [newParticipantAddr, setNewParticipantAddr] = useState("");
+  const [newParticipantName, setNewParticipantName] = useState("");
+  const [addParticipantMsg, setAddParticipantMsg] = useState("");
 
   const onchainTripId = trip.onchainTripId ?? 0n;  // bigint from DB ("1" → 1n); 0n fallback이면 훅은 enabled=false로 차단됨
   const isAdmin = trip.participants.find((p) => p.id === currentUserId)?.isAdmin ?? false;
@@ -55,11 +67,12 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
   const summary = calcParticipantSummary(trip, currentUserId);
 
   // ─── 컨트랙트 실시간 읽기 ──────────────────────────────────────────────
+  const ca = trip.contractAddress;  // 레거시 방이면 읽기 훅이 disabled됨
   const enabled = onchainTripId > 0n;
-  const tripBalanceResult = useTripBalance(onchainTripId, enabled);
-  const myDepositResult = useDepositedAmount(onchainTripId, connectedAddress, enabled && !!connectedAddress);
+  const tripBalanceResult = useTripBalance(onchainTripId, enabled, ca);
+  const myDepositResult = useDepositedAmount(onchainTripId, connectedAddress, enabled && !!connectedAddress, ca);
   const myUsdcResult = useUsdcBalance(connectedAddress, !!connectedAddress);
-  const settlementStatusResult = useSettlementStatus(onchainTripId, enabled);
+  const settlementStatusResult = useSettlementStatus(onchainTripId, enabled, ca);
 
   // 읽기 결과 (실패 = undefined, 로딩 중 = undefined)
   const contractBalance: bigint | undefined = tripBalanceResult.data;
@@ -70,9 +83,59 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
   const myUsdcError = myUsdcResult.isError;
 
   // ─── 온체인 훅 (쓰기 전용) ────────────────────────────────────────────
-  const depositHook = useDeposit(onchainTripId);
-  const releaseHook = useReleaseBudget(onchainTripId);
-  const returnHook = useReturnUnusedBudget(onchainTripId);
+  const isLegacy = isLegacyTrip(ca);
+  const depositHook = useDeposit(onchainTripId, ca);
+  const releaseHook = useReleaseBudget(onchainTripId, ca);
+  const returnHook = useReturnUnusedBudget(onchainTripId, ca);
+  const addParticipantHook = useAddParticipant(onchainTripId, ca);
+
+  // 4인 모델: A/B/C/D 고정 슬롯. 비어있는 첫 번째 슬롯에 배정.
+  const SLOTS: ParticipantId[] = ["A", "B", "C", "D"];
+  const usedIds = new Set(trip.participants.map((p) => p.id));
+  const nextSlotAvailable = SLOTS.find((s) => !usedIds.has(s)) ?? null;
+  const participantCount = trip.participants.length;
+  const MAX_PARTICIPANTS_UI = 4;
+
+  /** onchain 성공했지만 DB sync가 실패한 경우 같은 txHash로 재시도 */
+  async function handleAddParticipant() {
+    const addr = newParticipantAddr.trim() as `0x${string}`;
+    if (!ADDR_RE.test(addr)) {
+      setAddParticipantMsg(t("err_invalid_address"));
+      return;
+    }
+    if (participantCount >= MAX_PARTICIPANTS_UI) {
+      setAddParticipantMsg(t("err_max_participants", { max: String(MAX_PARTICIPANTS_UI) }));
+      return;
+    }
+    if (nextSlotAvailable === null) {
+      setAddParticipantMsg(t("err_no_slot"));
+      return;
+    }
+    setAddParticipantMsg("");
+
+    // onchain — hook이 confirmedTxHash를 보존하므로 DB sync 실패 후 재호출해도 안전
+    const txHash = await addParticipantHook.execute(addr);
+    if (!txHash) return;
+
+    // DB sync — 실패해도 txHash는 hook에 보존됨 → 재호출로 복구 가능
+    try {
+      await addTripParticipant(dbTripId, {
+        txHash,
+        chainId: NETWORK_CONFIG.chainId,
+        contractAddress: trip.contractAddress,
+        newParticipantAddress: addr,
+        displayName: newParticipantName.trim() || addr.slice(0, 10),
+      });
+      setNewParticipantAddr("");
+      setNewParticipantName("");
+      onParticipantAdded?.();
+    } catch (e) {
+      // onchain 성공, DB sync 실패 — 오류 메시지만 표시 (txHash는 hook에 보존)
+      setAddParticipantMsg(
+        t("err_db_sync_retry") + ": " + (e instanceof Error ? e.message : String(e))
+      );
+    }
+  }
 
   // deposit 성공 후 read 훅 refetch
   useEffect(() => {
@@ -134,6 +197,14 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
 
   return (
     <div className="space-y-4">
+      {/* 레거시 방 배너 */}
+      {isLegacy && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-800 flex items-start gap-2">
+          <span className="font-semibold whitespace-nowrap">{t("legacy_trip_badge")}</span>
+          <span>{t("legacy_trip_banner")}</span>
+        </div>
+      )}
+
       {/* 여행 요약 */}
       <div className="bg-white rounded-xl border border-stone-200 p-4">
         <h3 className="text-sm font-semibold text-stone-700 mb-3">{t("shared_wallet")}</h3>
@@ -289,7 +360,48 @@ export default function DashboardTab({ trip, currentUserId, onTripUpdate: _onTri
         </div>
       )}
 
-      {/* 미반납 예산 반납 카드 */}
+      {/* 참여자 추가 카드 — 관리자 전용, 4인 미만일 때만 표시 */}
+      {isAdmin && participantCount < MAX_PARTICIPANTS_UI && (
+        <div className="rounded-xl border p-4 bg-indigo-50 border-indigo-200">
+          <div className="flex items-center gap-2 mb-2">
+            <h3 className="text-sm font-semibold text-indigo-800">{t("add_participant")}</h3>
+            <span className="text-xs text-indigo-500">{t("admin_only_badge")}</span>
+            <span className="ml-auto text-xs text-indigo-500">{participantCount}/{MAX_PARTICIPANTS_UI}</span>
+          </div>
+          <p className="text-xs text-indigo-600 mb-2">
+            onchain addParticipant 트랜잭션 서명 후 DB에 동기화됩니다.
+          </p>
+          <div className="space-y-2">
+            <input
+              type="text"
+              className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 ${!newParticipantAddr || ADDR_RE.test(newParticipantAddr) ? "border-stone-200" : "border-rose-400"}`}
+              placeholder="0x 지갑 주소 (EOA)"
+              value={newParticipantAddr}
+              onChange={(e) => { setNewParticipantAddr(e.target.value); setAddParticipantMsg(""); }}
+            />
+            <input
+              type="text"
+              className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              placeholder="표시 이름 (선택)"
+              value={newParticipantName}
+              onChange={(e) => setNewParticipantName(e.target.value)}
+            />
+            <button
+              onClick={() => { void handleAddParticipant(); }}
+              disabled={addParticipantHook.state.status === "pending" || addParticipantHook.state.status === "waiting_approval" || !!isWrongChain || !newParticipantAddr}
+              title={isWrongChain ? t("switch_chain_title") : undefined}
+              className="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {addParticipantHook.state.status === "waiting_approval" ? t("awaiting_wallet") :
+               addParticipantHook.state.status === "pending" ? t("confirming_trip") :
+               t("add_participant_btn")}
+            </button>
+          </div>
+          {addParticipantMsg && <p className="text-xs mt-1.5 text-rose-600">{addParticipantMsg}</p>}
+          {addParticipantHook.state.status !== "idle" && <TxStatusRow state={addParticipantHook.state} />}
+        </div>
+      )}
+
       {(me?.allocatedBudget ?? 0n) > 0n && (
         <div className="rounded-xl border p-4 bg-amber-50 border-amber-200">
           <div className="flex items-center gap-2 mb-1">

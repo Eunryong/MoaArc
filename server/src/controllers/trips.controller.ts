@@ -4,7 +4,7 @@
  */
 
 import type { Context } from "hono";
-import { verifyCreateTripTx, fetchOnchainParticipants, ARC_TESTNET_CHAIN_ID } from "../lib/chain.js";
+import { verifyCreateTripTx, fetchOnchainParticipants, verifyAddParticipantTx, ACTIVE_CHAIN_ID } from "../lib/chain.js";
 import * as repo from "../repositories/trip.repository.js";
 
 // ─── 터널 body 파싱 ──────────────────────────────────────────────────────────
@@ -38,7 +38,8 @@ export const APPROVAL_ACTION = new Set(["승인", "수정요청"]);
 export const MAX_NAME = 200;
 export const MAX_TEXT = 2000;
 export const MAX_URL = 1000;
-const MAX_PARTICIPANTS = 50;
+// 4인 모델: ParticipantId A/B/C/D 슬롯과 1:1 대응. 확장 시 이 값과 프런트 MAX_PARTICIPANTS_UI를 같이 변경.
+const MAX_PARTICIPANTS = 4;
 
 export function assertAddr(val: unknown, field: string): string {
   if (typeof val !== "string" || !ADDR_RE.test(val))
@@ -95,8 +96,8 @@ export async function createTrip(c: Context) {
   if (!txHash || !chainId || !contractAddress || !Array.isArray(participants)) {
     return c.json({ error: "txHash, chainId, contractAddress, participants 필드가 필요합니다." }, 400);
   }
-  if (chainId !== ARC_TESTNET_CHAIN_ID) {
-    return c.json({ error: `Arc Testnet(chainId=${ARC_TESTNET_CHAIN_ID})만 지원합니다.` }, 400);
+  if (chainId !== ACTIVE_CHAIN_ID) {
+    return c.json({ error: `지원하지 않는 chainId=${chainId}. 서버 chainId=${ACTIVE_CHAIN_ID}` }, 400);
   }
 
   let verified;
@@ -110,7 +111,7 @@ export async function createTrip(c: Context) {
     return c.json({ error: "요청 지갑이 온체인 트랜잭션의 admin과 다릅니다." }, 403);
   }
 
-  const existing = await repo.findTripByOnchain(chainId, contractAddress, verified.tripId);
+  const existing = await repo.findTripByOnchain(chainId, contractAddress, String(verified.tripId));
   if (existing) {
     return c.json({ error: "이미 등록된 여행방입니다.", tripId: existing.id }, 409);
   }
@@ -143,7 +144,7 @@ export async function createTrip(c: Context) {
   const trip = await repo.createTrip({
     chainId,
     contractAddress,
-    onchainTripId: verified.tripId,
+    onchainTripId: String(verified.tripId),
     name: verified.name,
     adminAddress: caller,
     createTxHash: txHash,
@@ -201,7 +202,7 @@ export async function addItineraryItem(c: Context) {
 
 export async function patchItineraryItem(c: Context) {
   const trip = c.get("tripRecord");
-  const itemId = c.req.param("itemId");
+  const itemId = c.req.param("itemId") ?? "";
   const body = await parseBody<Partial<{
     date: string; time: string; location: string; activity: string;
     participants: string[]; notes: string; status: string;
@@ -292,6 +293,15 @@ export async function addExpense(c: Context) {
     createdBy: caller,
     shares: body.shares ?? [],
   });
+
+  // 등록 직후 전원 승인 체크 — 1명 방에서 등록자가 유일한 분담 대상자인 경우 즉시 확정
+  const firstVer = expense.versions[0];
+  if (firstVer) {
+    await repo.checkAndConfirmExpense(expense.id, firstVer.id, firstVer.shares);
+    // 최신 상태를 반환값에 반영
+    const updated = await repo.findExpenseById(expense.id, trip.id);
+    return c.json({ expense: updated ?? expense }, 201);
+  }
   return c.json({ expense }, 201);
 }
 
@@ -299,7 +309,7 @@ export async function approveExpense(c: Context) {
   const trip = c.get("tripRecord");
   const caller = c.get("callerAddress");
   const isAdmin = c.get("isAdmin");
-  const expenseId = c.req.param("expenseId");
+  const expenseId = c.req.param("expenseId") ?? "";
   const body = await parseBody<{
     action: string; reason?: string;
     newShares?: { address: string; amountUsdc: string }[];
@@ -334,10 +344,13 @@ export async function approveExpense(c: Context) {
       reason: body.reason ?? "수정",
     });
     await repo.updateExpenseStatus(expenseId, { status: "수정안투표중", currentVersion: newVersion.version });
+    // 수정안 제출 직후에도 전원 승인 체크 — 제안자가 유일한 분담 대상자이면 즉시 확정
+    const sharesJson = JSON.stringify(body.newShares);
+    await repo.checkAndConfirmExpense(expenseId, newVersion.id, sharesJson);
     return c.json({ version: newVersion });
   }
 
-  // 승인 등록
+  // 승인 등록 (이미 같은 action 레코드가 있으면 upsert)
   const existing = await repo.findExpenseApproval(currentVer.id, caller);
   await repo.upsertExpenseApproval({
     existingId: existing?.id,
@@ -351,16 +364,9 @@ export async function approveExpense(c: Context) {
     return c.json({ message: "수정 요청이 접수되었습니다." });
   }
 
-  // 전원 승인 확인
-  const participants = await repo.findParticipantsByTrip(trip.id);
-  const allApprovals = await repo.findAllApprovals(currentVer.id);
-  const allApproved = participants.every((p) =>
-    allApprovals.some((a) => a.address === p.address && a.action === "승인")
-  );
-
-  if (allApproved) {
-    await repo.updateExpenseVersionStatus(currentVer.id, "확정");
-    await repo.updateExpenseStatus(expenseId, { status: "확정" });
+  // 분담 대상자 전원 승인 체크 — 공통 함수 사용
+  const confirmed = await repo.checkAndConfirmExpense(expenseId, currentVer.id, currentVer.shares);
+  if (confirmed) {
     return c.json({ message: "전원 승인 — 지출이 확정되었습니다." });
   }
 
@@ -377,10 +383,109 @@ export async function getNotifications(c: Context) {
 }
 
 export async function markNotifRead(c: Context) {
-  const notifId = c.req.param("notifId");
+  const notifId = c.req.param("notifId") ?? "";
   const caller = c.get("callerAddress");
   const notif = await repo.findNotification(notifId, caller);
   if (!notif) return c.json({ error: "알림을 찾을 수 없습니다." }, 404);
   await repo.markNotificationRead(notifId);
   return c.json({ message: "읽음 처리 완료" });
+}
+
+// ─── 참여자 추가 ──────────────────────────────────────────────────────────────
+// POST /api/trips/:dbTripId/participants
+// body: { txHash, chainId, contractAddress, newParticipantAddress, displayName }
+// - 관리자 전용, settlementStatus가 None인 방에서만 가능
+// - onchain ParticipantAdded 이벤트 검증 후 DB upsert (멱등)
+
+export async function addTripParticipant(c: Context) {
+  const caller = c.get("callerAddress");
+  const trip = c.get("tripRecord");
+
+  const body = await parseBody<{
+    txHash: string;
+    chainId: number;
+    contractAddress: string;
+    newParticipantAddress: string;
+    displayName?: string;
+  }>(c);
+
+  const { txHash, chainId, contractAddress, newParticipantAddress, displayName } = body ?? {};
+
+  if (!txHash || !chainId || !contractAddress || !newParticipantAddress) {
+    return c.json({ error: "txHash, chainId, contractAddress, newParticipantAddress 필드가 필요합니다." }, 400);
+  }
+  if (chainId !== ACTIVE_CHAIN_ID) {
+    return c.json({ error: `지원하지 않는 chainId=${chainId}. 서버 chainId=${ACTIVE_CHAIN_ID}` }, 400);
+  }
+  if (contractAddress.toLowerCase() !== trip.contractAddress.toLowerCase()) {
+    return c.json({ error: "컨트랙트 주소가 이 여행방과 다릅니다." }, 400);
+  }
+
+  // 주소·표시이름 형식 검증
+  const newAddr = assertAddr(newParticipantAddress, "newParticipantAddress");
+  if (newAddr === "0x0000000000000000000000000000000000000000") {
+    return c.json({ error: "유효하지 않은 주소입니다." }, 400);
+  }
+  const rawName = typeof displayName === "string" ? displayName.trim() : "";
+  if (rawName.length > MAX_NAME) {
+    return c.json({ error: `displayName은 최대 ${MAX_NAME}자입니다.` }, 400);
+  }
+  const name = rawName || newAddr.slice(0, 10);
+
+  // admin 확인 (requireAdmin 미들웨어가 이미 처리하지만 이중 방어)
+  if (caller !== trip.adminAddress) {
+    return c.json({ error: "관리자 권한이 필요합니다." }, 403);
+  }
+
+  // 자기 자신 추가 방지
+  if (newAddr === caller) {
+    return c.json({ error: "관리자는 이미 참여자입니다." }, 400);
+  }
+
+  // ── 멱등성 먼저 확인: 같은 주소가 이미 있으면 200으로 즉시 반환 ────────────
+  // (4인 제한 체크보다 앞에 두어, 4번째 추가 재시도가 400이 되지 않도록)
+  const earlyExisting = await repo.findParticipantByAddress(trip.id, newAddr);
+  if (earlyExisting) {
+    const full = await repo.findTripById(trip.id);
+    return c.json({ trip: full, alreadyExists: true });
+  }
+
+  // onchain 이벤트 검증 — DB write 이전에 실행해 가스 낭비 방지
+  let verified;
+  try {
+    verified = await verifyAddParticipantTx(
+      txHash as `0x${string}`,
+      chainId,
+      contractAddress,
+      BigInt(trip.onchainTripId)
+    );
+  } catch (e) {
+    return c.json({ error: `트랜잭션 검증 실패: ${String(e)}` }, 400);
+  }
+
+  if (verified.newParticipant !== newAddr) {
+    return c.json({
+      error: `이벤트의 newParticipant(${verified.newParticipant})가 요청 주소(${newAddr})와 다릅니다.`
+    }, 400);
+  }
+
+  // ── DB transaction으로 직렬화 — 4인 제한 초과 방지 ────────────────────────
+  // 동시 요청이 모두 통과하지 않도록 participants count 재확인을 tx 안에서 수행
+  let full;
+  try {
+    full = await repo.addParticipantAtomic({
+      tripId: trip.id,
+      address: newAddr,
+      displayName: name,
+      maxParticipants: MAX_PARTICIPANTS,
+    });
+  } catch (e) {
+    const msg = String(e);
+    if (msg.includes("MAX_PARTICIPANTS")) {
+      return c.json({ error: `최대 ${MAX_PARTICIPANTS}명까지 참여할 수 있습니다.` }, 400);
+    }
+    throw e;
+  }
+
+  return c.json({ trip: full }, 201);
 }

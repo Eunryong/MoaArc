@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useI18n } from "../i18n";
 import type {
   Trip,
@@ -267,7 +267,13 @@ function AddExpenseForm({
   const [customShares, setCustomShares] = useState<Partial<Record<ParticipantId, string>>>({});
   const [useEqualSplit, setUseEqualSplit] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
+  // 필드별 인라인 오류 메시지
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<"title" | "date" | "amount" | "participants" | "split", string>>>({});
+  // 서버 오류 / 기타 폼 단위 오류
+  const [formError, setFormError] = useState("");
+  const titleRef = useRef<HTMLInputElement>(null);
+  const dateRef = useRef<HTMLInputElement>(null);
+  const amountRef = useRef<HTMLInputElement>(null);
 
   const totalParsed = parseUsdcInput(amountStr);
 
@@ -296,24 +302,44 @@ function AddExpenseForm({
       else next.add(pid);
       return next;
     });
+    setFieldErrors((prev) => ({ ...prev, participants: undefined, split: undefined }));
   }
 
   async function handleSubmit() {
-    // 입력 검증
-    if (!title.trim()) { setError(t("err_400")); return; }
-    if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) { setError(t("err_400")); return; }
-    if (!totalParsed || totalParsed <= 0n) { setError(t("err_400")); return; }
-    if (selectedParticipants.size === 0) { setError(t("err_400")); return; }
+    // 필드별 검증 — 첫 번째 실패에서 해당 필드에 포커스 후 중단
+    if (!title.trim()) {
+      setFieldErrors((prev) => ({ ...prev, title: t("err_title_required") }));
+      titleRef.current?.focus();
+      return;
+    }
+    if (!date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      setFieldErrors((prev) => ({ ...prev, date: t("err_date_invalid") }));
+      dateRef.current?.focus();
+      return;
+    }
+    if (!totalParsed || totalParsed <= 0n) {
+      setFieldErrors((prev) => ({ ...prev, amount: t("err_amount_required") }));
+      amountRef.current?.focus();
+      return;
+    }
+    if (selectedParticipants.size === 0) {
+      setFieldErrors((prev) => ({ ...prev, participants: t("err_no_participants") }));
+      return;
+    }
 
     const shares = computeShares();
     const sharesSum = shares.reduce((s, sh) => s + sh.amount, 0n);
     if (sharesSum !== totalParsed) {
-      setError(`Split total (${fmtUsdc(sharesSum)}) does not match expense total (${fmtUsdc(totalParsed)}).`);
+      const msg = t("err_split_mismatch")
+        .replace("{sum}", fmtUsdc(sharesSum))
+        .replace("{total}", fmtUsdc(totalParsed));
+      setFieldErrors((prev) => ({ ...prev, split: msg }));
       return;
     }
 
     setSubmitting(true);
-    setError("");
+    setFieldErrors({});
+    setFormError("");
     try {
       await addExpense(dbTripId, {
         title: title.trim(),
@@ -329,7 +355,7 @@ function AddExpenseForm({
       });
       onSuccess();
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : t("err_500"));
+      setFormError(e instanceof Error ? e.message : t("err_500"));
     } finally {
       setSubmitting(false);
     }
@@ -353,12 +379,14 @@ function AddExpenseForm({
         <div>
           <label className="text-xs font-medium text-stone-600 mb-1 block">{t("expense_title_label")} *</label>
           <input
+            ref={titleRef}
             type="text"
-            className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+            className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 ${fieldErrors.title ? "border-rose-400" : "border-stone-200"}`}
             placeholder={t("expense_title_placeholder")}
             value={title}
-            onChange={(e) => { setTitle(e.target.value); setError(""); }}
+            onChange={(e) => { setTitle(e.target.value); setFieldErrors((prev) => ({ ...prev, title: undefined })); }}
           />
+          {fieldErrors.title && <p className="mt-1 text-xs text-rose-600">{fieldErrors.title}</p>}
         </div>
 
         {/* 카테고리 + 날짜 */}
@@ -376,11 +404,13 @@ function AddExpenseForm({
           <div>
             <label className="text-xs font-medium text-stone-600 mb-1 block">{t("date_label")} *</label>
             <input
+              ref={dateRef}
               type="date"
-              className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 ${fieldErrors.date ? "border-rose-400" : "border-stone-200"}`}
               value={date}
-              onChange={(e) => { setDate(e.target.value); setError(""); }}
+              onChange={(e) => { setDate(e.target.value); setFieldErrors((prev) => ({ ...prev, date: undefined })); }}
             />
+            {fieldErrors.date && <p className="mt-1 text-xs text-rose-600">{fieldErrors.date}</p>}
           </div>
         </div>
 
@@ -388,14 +418,16 @@ function AddExpenseForm({
         <div>
           <label className="text-xs font-medium text-stone-600 mb-1 block">{t("amount_usdc_label")} *</label>
           <input
+            ref={amountRef}
             type="number"
             min="0"
             step="0.01"
-            className="w-full border border-stone-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 tabular-nums"
+            className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 tabular-nums ${fieldErrors.amount ? "border-rose-400" : "border-stone-200"}`}
             placeholder="0.00"
             value={amountStr}
-            onChange={(e) => { setAmountStr(e.target.value); setError(""); }}
+            onChange={(e) => { setAmountStr(e.target.value); setFieldErrors((prev) => ({ ...prev, amount: undefined })); }}
           />
+          {fieldErrors.amount && <p className="mt-1 text-xs text-rose-600">{fieldErrors.amount}</p>}
         </div>
 
         {/* 결제 방식 */}
@@ -463,12 +495,16 @@ function AddExpenseForm({
               </div>
             ))}
           </div>
+          {fieldErrors.participants && (
+            <p className="mt-1 text-xs text-rose-600">{fieldErrors.participants}</p>
+          )}
           {totalParsed != null && totalParsed > 0n && (
             <div className={`mt-2 text-xs px-3 py-1.5 rounded-lg ${isSharesValid ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
               Split: {fmtUsdc(sharesSum)} / Total: {fmtUsdc(totalParsed)}
               {isSharesValid ? " ✓" : ` (diff: ${fmtUsdc(totalParsed - sharesSum)})`}
             </div>
           )}
+          {fieldErrors.split && <p className="mt-1 text-xs text-rose-600">{fieldErrors.split}</p>}
         </div>
 
         {/* 메모 */}
@@ -483,9 +519,9 @@ function AddExpenseForm({
           />
         </div>
 
-        {error && (
+        {formError && (
           <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-sm text-rose-700">
-            {error}
+            {formError}
           </div>
         )}
 

@@ -22,8 +22,6 @@ import {
   submitTripIntentTxHash,
   getIntentStatus,
   getToken,
-  getStudioTestAddress,
-  STUDIO_TEST_MODE,
   type TripApiRecord,
 } from "../apiClient";
 
@@ -126,14 +124,8 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
     setErrorMsg(null);
 
     // 토큰 확인 — 없으면 재로그인 안내
-    // STUDIO_TEST_MODE: getStudioTestAddress()가 있으면 ?as= 우회로 인증됨
-    const hasAuth = STUDIO_TEST_MODE ? !!getStudioTestAddress() : !!getToken();
-    if (!hasAuth) {
-      setErrorMsg(
-        STUDIO_TEST_MODE
-          ? "Test mode: connect your wallet."
-          : t("err_401")
-      );
+    if (!getToken()) {
+      setErrorMsg(t("err_401"));
       setStep("form");
       return;
     }

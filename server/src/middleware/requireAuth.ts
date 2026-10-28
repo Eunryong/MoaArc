@@ -2,27 +2,13 @@
  * JWT 인증 미들웨어 + 여행방 참여자/관리자 권한 검증
  *
  * 인증 경로: Authorization: Bearer <token> 헤더만 허용합니다.
- * X-Auth-Token, Cookie, URL 쿼리 파라미터(_t) 경로는 제거됐습니다.
- * Arc Studio 게이트웨이가 Authorization 헤더를 제거하면 401로 실패합니다.
- * 이것은 보안 차단이며, URL/쿠키/커스텀 헤더 우회 경로는 추가하지 않습니다.
- *
- * [STUDIO_TEST_MODE 우회 — Arc Studio 프리뷰 전용]
- * STUDIO_TEST_MODE==="1" && NODE_ENV!=="production" 일 때만,
- * Authorization 헤더가 없는 경우에 한해 ?as=0x... 쿼리를 callerAddress로 사용합니다.
- * 프로덕션 배포 전 반드시 제거하세요 (docs/STUDIO_TEST_MODE.md 참고).
+ * X-Auth-Token, Cookie, URL 쿼리 파라미터 우회 경로는 없습니다.
+ * Vite 개발 프록시(/api → localhost:3001)가 Authorization 헤더를 그대로 전달합니다.
  */
 
-import { randomUUID } from "node:crypto";
 import type { Context, Next } from "hono";
 import { verifyToken } from "../lib/auth.js";
 import { prisma } from "../lib/prisma.js";
-
-// 0x + 40 hex 주소 정규식
-const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-
-const STUDIO_TEST_MODE =
-  process.env.STUDIO_TEST_MODE === "1" &&
-  process.env.NODE_ENV !== "production";
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -37,45 +23,10 @@ declare module "hono" {
 
 export async function requireAuth(c: Context, next: Next) {
   const authHeader = c.req.header("Authorization") ?? "";
-  const hasAuthorizationHeader = authHeader.length > 0;
   const hasBearerScheme = authHeader.startsWith("Bearer ");
   const rawToken = hasBearerScheme ? authHeader.slice(7) : null;
 
-  // 진단 로그: 서버 생성 ID만 사용, 헤더 값·토큰값 미기록
-  // hasAuthorizationHeader: Authorization 헤더 자체의 도착 여부
-  // hasBearerScheme: "Bearer " 스킴 여부 (헤더가 있지만 스킴이 다를 경우 구분)
-  // [임시 진단] 도착한 헤더 이름 목록 (소문자 정렬, 값 미기록)
-  // authorization/cookie는 이름도 민감하므로 존재 여부(boolean)만 기록
-  const reqId = randomUUID();
-  const allHeaderNames = [...c.req.raw.headers.keys()]
-    .map((h) => h.toLowerCase())
-    .filter((h) => h !== "authorization" && h !== "cookie")
-    .sort();
-  const hasCookieHeader = c.req.raw.headers.has("cookie");
-  console.log(
-    `[auth] reqId=${reqId}` +
-    ` path=${c.req.path}` +
-    ` hasAuthorizationHeader=${hasAuthorizationHeader}` +
-    ` hasBearerScheme=${hasBearerScheme}` +
-    ` hasToken=${!!rawToken}` +
-    ` hasCookie=${hasCookieHeader}` +
-    ` headers=[${allHeaderNames.join(",")}]`
-  );
-
   if (!rawToken) {
-    // [STUDIO_TEST_MODE] Bearer 헤더 없을 때만 ?as= 쿼리 허용
-    if (STUDIO_TEST_MODE) {
-      const asParam = c.req.query("as") ?? "";
-      if (ETH_ADDR_RE.test(asParam)) {
-        const studioAddress = asParam.toLowerCase();
-        console.log(
-          `[auth] reqId=${reqId} path=${c.req.path}` +
-          ` mode=studio-test addr=${studioAddress.slice(0, 6)}...`
-        );
-        c.set("callerAddress", studioAddress);
-        return next();
-      }
-    }
     return c.json({ error: "인증이 필요합니다." }, 401);
   }
   try {

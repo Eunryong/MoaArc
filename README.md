@@ -6,69 +6,102 @@ MoaArc는 여행 일정을 관리하고, 참여자 간 공동경비를 Arc 블�
 
 **핵심 흐름:** 일정 입력 → 비용 예측(에이전트) → 공동예산 편성 → 실제 지출 기록 → 예상/실제 비교 → 분담 승인 → 지갑 서명 → Arc Testnet 공동경비 정산
 
----
-
-## 구현된 기능
-
-### 스마트 컨트랙트 (`MoaArkTreasury` — Arc Testnet 배포 완료)
-- **주소:** `0x63aff048f159b1712e7c8d728cdc61b004eed40e` ([Arc 탐색기](https://explorer.testnet.arc.io/address/0x63aff048f159b1712e7c8d728cdc61b004eed40e))
-- 여행방 생성 (`createTrip`) — 관리자 + 참여자 등록, 최대 50명
-- 입금 (`deposit`) — USDC ERC-20 approve + transferFrom, 여행방별 잔액 분리
-- 예산 이체 (`releaseBudget`) — 결제자 외부 지갑으로 공동자금 이체 (참여자만 가능)
-- 예산 반납 (`returnUnusedBudget`) — 외부 지갑 공동자금을 컨트랙트로 반환
-- 부족분 납입 (`payDeficit`) — 최종 정산 시 추가 납부
-- 최종 정산 제안 (`proposeFinalSettlement`) — 관리자 제출, 온체인 해시 파생
-- 정산 승인 (`approveFinalSettlement`) — 참여자 전원 서명 필요
-- 환급 수령 (`claimRefund`) — 전원 승인 + 부족분 완납 + 잔액 일치 검증 후 개별 수령
-- `SettlementStatus` 상태머신 (None → Proposed → DeficitPaying → ClaimStarted → Completed)
-- 개인 선결제 기록 (`recordPersonalPrepaid`) / 실제 사용액 기록 (`recordActualSpend`)
-- 정산 제안 후 `releaseBudget`/`returnUnusedBudget` 잠금 (`MoaArcTreasury` v2에서 구현 예정)
-
-### 프론트엔드
-- **DEMO 모드:** A/B/C/D 시연 데이터, 역할 전환, 시연 초기화 — 실제 트랜잭션 없음
-- **TESTNET 모드:** 지갑 연결 필수, Arc Testnet 지갑 주소로 참여자 인식, 역할 전환 비활성화
-- 상단 요약 바: 내가 낸 돈 / 내가 부담한 돈 / 돌려받거나 추가로 낼 돈 (bigint 정수 계산)
-- 탭 5개: 대시보드, 내 경비, 지출 목록, 최종 정산, 일정·에이전트
-- 지출 분담 수정 (관리자 전용) + 전원 승인 흐름 (버전 이력, 수정 요청)
-- 전액/비율 환불 처리 (bigint 정수 비례 계산, 마지막 참여자 보정)
-- 온체인 읽기 훅: `tripBalance`, `depositedAmount`, `allocatedBudget`, `isParticipant`, `settlementStatus`, USDC 잔액 등 (15초 interval refetch)
-- 온체인 쓰기 훅: `deposit`, `releaseBudget`, `returnUnusedBudget`, `payDeficit`, `approveFinalSettlement`, `claimRefund`, `createTrip`
-- 트랜잭션 영수증 확인 후 성공 처리 + Arc Testnet 탐색기 링크 제공
-- 일정·에이전트 탭: 일정 목록, 비용 예측 표시 (출처/신뢰도/조회 시각), 에이전트 대화
+Built with [Arc Studio](https://studio.arc.io)
 
 ---
 
-## 구현 상태 및 제한
+## 기술 스택
 
-| 항목 | 상태 | 비고 |
-|------|------|------|
-| **백엔드 서버 / 영속 DB** | ✅ 구현됨 | Hono + Prisma + SQLite(개발), `bun run server` |
-| **지갑 서명 인증 (nonce/JWT)** | ✅ 구현됨 | `GET /api/auth/nonce` + `POST /api/auth/verify`, 24h JWT |
-| **여행방 DB 등록/목록** | ✅ 구현됨 | `POST /api/trips`, `GET /api/trips` (참여자별 필터) |
-| **일정 CRUD** | ✅ 구현됨 | `GET/POST /api/trips/:id/itinerary`, PATCH 지원 |
-| **지출 기록·승인 흐름** | ✅ 구현됨 | 버전 이력, 수정 요청, 전원 승인 |
-| **Gemini 에이전트 실검색** | ⚠️ 부분 | `GEMINI_API_KEY` 미설정 시 응답 없음, 설정 시 활성 |
-| **푸시 알림** | ❌ 앱 내 표시만 | 백그라운드 서버·웹소켓 필요 |
-| **정산 중 잔액 변경 잠금** | ⚠️ 부분 | `MoaArcTreasury` v2 배포 예정 |
-| **실제 tripId 동적 파싱** | ⚠️ 부분 | `TripCreated` 이벤트 파싱 완성 필요 |
-| **Mainnet 배포** | 🚫 금지 | 독립 보안 감사 + 사용자 직접 배포 |
+- **Frontend:** React 18, Vite 6, TypeScript 5, Tailwind CSS 3
+- **Web3:** wagmi v2, viem v2, ConnectKit
+- **Backend:** Hono, Bun, Prisma 5, SQLite (개발) / Postgres (프로덕션)
+- **Contracts:** Solidity 0.8.28, Foundry
+- **Chain:** Arc Testnet (Chain ID: 5042002) / Arc Mainnet (Chain ID: 5042) 환경변수로 전환
+- **Token:** USDC (ERC-20, 6 decimals)
+- **금액 처리:** 모든 금액 bigint 마이크로USDC (1 USDC = 1_000_000n)
+- **인증:** Wallet Signature (nonce/JWT), Bearer only
 
-### 백엔드 실행
+---
+
+## 개발 환경 설정
+
+### 전제 조건
+
+- [Bun](https://bun.sh) v1.3+
+- [Foundry](https://getfoundry.sh) (계약 빌드/테스트)
+
+### 설치 및 실행
 
 ```bash
-# .env 또는 환경변수 설정 (env.example 참고)
-DATABASE_URL=file:./server/prisma/dev.db
-JWT_SECRET=<랜덤 32바이트 이상>
-MOARC_CONTRACT_ADDRESS=0x63aff048f159b1712e7c8d728cdc61b004eed40e
-ARC_TESTNET_RPC_FALLBACK=https://rpc.testnet.arc.io
+# 1. 의존성 설치
+bun install
 
-bun run server          # API 서버 (localhost:3001)
-bun run dev             # Vite 개발 서버 (localhost:5173, /api → 3001 프록시)
+# 2. Prisma 클라이언트 생성
+bun run db:generate
+
+# 3. 환경변수 설정 (아래 참고)
+cp env.example .env
+# .env를 편집해서 필수 값 채우기
+
+# 4. 개발 서버 실행 (Vite + 백엔드 동시)
+bun run dev        # Vite (localhost:5173)
+bun run server     # Hono API 서버 (localhost:3001)
+
+# 5. 검사
+bun run check      # lint + typecheck
+bun run contracts:test   # Foundry 계약 테스트 (75개)
 ```
 
-### Arc Studio 프리뷰 환경
+### Clean checkout 재현 절차
 
-Arc Studio 프리뷰(`*.preview.studio.arc.io`)에서는 Vite proxy(`/api → localhost:3001`)가 브라우저와 서버를 연결합니다. 절대 주소(`http://localhost:3001`)는 브라우저에서 도달 불가이므로 항상 상대 경로(`/api/...`)를 사용합니다.
+```bash
+git clone https://github.com/Eunryong/MoaArc.git
+cd MoaArc
+bun install             # bun.lock 기반 설치
+bun run db:generate     # Prisma 클라이언트 생성 (필수 — @prisma/client 타입 생성)
+npx tsc --noEmit        # 프런트엔드 typecheck (0 errors 기대)
+npx tsc -p server/tsconfig.json --noEmit   # 서버 typecheck (0 errors 기대)
+bun run check           # lint + typecheck 통합
+```
+
+> **주의:** `scripts/compass-deploy.ts`는 Arc Studio 내부 배포 스크립트로 `@circlefin/compass-chains`를 요구합니다.
+> 이 패키지는 공개 npm에 없으며 Arc Studio 환경에서만 사용됩니다.
+> `scripts/`는 `tsconfig.json`에서 제외되어 있으므로 일반 `tsc --noEmit`에 영향 없습니다.
+
+---
+
+## 환경변수
+
+### 필수 (서버)
+
+| 이름 | 목적 |
+|------|------|
+| `DATABASE_URL` | Prisma DB (SQLite: `file:./server/prisma/dev.db`) |
+| `JWT_SECRET` | JWT 서명 키 (랜덤 32바이트 이상 권장) |
+| `MOARC_CONTRACT_ADDRESS` | 배포된 MoaArcTreasury 컨트랙트 주소 |
+| `ARC_TESTNET_RPC_FALLBACK` | Arc Testnet 공개 RPC URL |
+
+### 선택 (서버)
+
+| 이름 | 목적 |
+|------|------|
+| `MOARC_NETWORK` | `testnet`(기본) 또는 `mainnet` |
+| `MOARC_CHAIN_ID` | 체인 ID 정수 (기본: 5042002) |
+| `MOARC_USDC_ADDRESS` | USDC ERC-20 주소 (mainnet 필수) |
+| `ARC_RPC_URL`, `ARC_RPC_URL_2`, `ARC_RPC_URL_3` | 추가 RPC fallback |
+| `GEMINI_API_KEY` | Google AI Studio 키 (에이전트 기능) |
+| `PORT` | 서버 포트 (기본: 3001) |
+
+### 프런트엔드 빌드 (VITE_*)
+
+| 이름 | 목적 |
+|------|------|
+| `VITE_NETWORK` | `testnet`(기본) 또는 `mainnet` |
+| `VITE_CONTRACT_ADDRESS` | mainnet 배포 시 필수 |
+| `VITE_USDC_ADDRESS` | mainnet 배포 시 필수 |
+| `VITE_CHAIN_ID` | mainnet 배포 시 필수 |
+
+Arc Studio 환경에서 자동 주입되는 변수: `RPC_PROXY_BASE_URL`, `RPC_PROXY_TOKEN`, `RPC_PROXY_CHAINS` (Arc Studio 외부에서는 불필요).
 
 ---
 
@@ -76,53 +109,24 @@ Arc Studio 프리뷰(`*.preview.studio.arc.io`)에서는 Vite proxy(`/api → lo
 
 | 컨트랙트 | 네트워크 | 주소 | 상태 |
 |---------|---------|------|------|
-| TripSharedTreasury (V1) | Arc Testnet | `0x0e540064015628b03ec62b44d94721b1b50e5d92` | Superseded |
+| TripSharedTreasury V1 | Arc Testnet | `0x0e540064015628b03ec62b44d94721b1b50e5d92` | Superseded |
 | TripSharedTreasuryV2 | Arc Testnet | `0x3bc08cdabcf702e01b458923a946cd664e438c3e` | Superseded |
-| **MoaArkTreasury** | **Arc Testnet** | **`0x63aff048f159b1712e7c8d728cdc61b004eed40e`** | **Active** |
-
-> 이미 배포된 컨트랙트는 온체인에서 이름을 변경할 수 없습니다. 안전성 수정이 필요하면 새 `MoaArcTreasury` 컨트랙트를 Arc Testnet에 배포합니다.
+| MoaArcTreasury v2 | Arc Testnet | `0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3` | Superseded |
+| **MoaArcTreasury v3** | **Arc Testnet** | **`0xf7a733fb2084b31591a0fbacded683efbe5b6728`** | **Active** |
 
 ---
 
-## 설치 및 실행
+## 계약 명령
 
 ```bash
-bun install
-bun run dev        # 개발 서버 (localhost:5173)
-bun run check      # lint + typecheck
-bun run contracts:test   # Foundry 단위 테스트 (42개)
-bun run contracts:build  # forge build
+bun run contracts:build   # forge build
+bun run contracts:test    # forge test (75개 통과 — 53 unit + 2 invariant)
 ```
-
-### 환경변수 (`.env.example` 참고)
-
-```env
-# Gemini API (서버 전용 — 클라이언트 번들에 포함 금지)
-GEMINI_API_KEY=
-
-# 모델 ID (기본값: gemini-2.0-flash)
-GEMINI_MODEL_ID=gemini-2.0-flash
-
-# DB (서버 구현 시)
-DATABASE_URL=
-```
-
----
-
-## 기술 스택
-
-- **Frontend:** React 18, Vite, TypeScript, Tailwind CSS
-- **Web3:** wagmi v2, viem v2, ConnectKit
-- **Contracts:** Solidity 0.8.28, Foundry
-- **Chain:** Arc Testnet (Chain ID: 5042002)
-- **Token:** USDC (ERC-20, 6 decimals, `0x3600000000000000000000000000000000000000`)
-- **금액 처리:** 모든 금액 bigint 마이크로USDC (1 USDC = 1_000_000n)
 
 ---
 
 ## 보안 고지
 
 - 이 앱은 독립적인 제3자 보안 감사를 받지 않았습니다.
-- 지출 내역은 수동 기록이며 외부 결제 시스템의 거래를 검증하지 않습니다.
-- 영수증 첨부는 참여자 확인 기록이며 카드사/결제 플랫폼 검증과 다릅니다.
 - Mainnet 배포 전 반드시 독립 감사를 받으십시오.
+- `STUDIO_TEST_MODE` 인증 우회는 완전히 제거됐습니다.

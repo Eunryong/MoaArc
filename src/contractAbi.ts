@@ -1,14 +1,16 @@
 // ─── MoaArcTreasury ABI ───────────────────────────────────────────────────
-// MoaArcTreasury (v2, Active): 0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3 (Arc Testnet)
-// Deploy Tx: 0x3a9bd689e22fdf2a6fba1ffc569535aae21000b7cb465d8c1a54d7378155dc43
+// MoaArcTreasury (v3, Active): 0xf7a733fb2084b31591a0fbacded683efbe5b6728 (Arc Testnet)
+// Deploy Tx: 0xaa69a1a89b775873ba20bd60f81b6e99df1ebf55f1119b7fae180d4f304dc0ac
+// VERSION: MoaArc-3.0
 //
 // Legacy contracts (do NOT use):
+//   MoaArcTreasury (v2):       0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3
 //   MoaArkTreasury (v1):       0x63aff048f159b1712e7c8d728cdc61b004eed40e
 //   TripSharedTreasuryV2:      0x3bc08cdabcf702e01b458923a946cd664e438c3e
 //   TripSharedTreasury (V1):   0x0e540064015628b03ec62b44d94721b1b50e5d92
 
-/** Active contract: MoaArcTreasury v2 (Arc Testnet) */
-export const MOAARK_ADDRESS = "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3" as const;
+/** Active contract: MoaArcTreasury v3 (Arc Testnet). Read from VITE_CONTRACT_ADDRESS in production. */
+export const MOAARK_ADDRESS = "0xf7a733fb2084b31591a0fbacded683efbe5b6728" as const;
 /** @deprecated MoaArkTreasury v1 — superseded by MoaArcTreasury v2 */
 export const MOAARK_V1_ADDRESS = "0x63aff048f159b1712e7c8d728cdc61b004eed40e" as const;
 /** @deprecated TripSharedTreasuryV2 */
@@ -297,7 +299,35 @@ export const MOAARK_ABI = [
     name: "SettlementCancelled",
     inputs: [{ name: "tripId", type: "uint256", indexed: true }],
   },
-  // ─── ERC20 approve (USDC) ───────────────────────────────────────────────
+  // ─── addParticipant (MoaArcTreasury v3) ─────────────────────────────────
+  // Admin only. settlementStatus must be None. newParticipant must be an EOA.
+  {
+    type: "function",
+    name: "addParticipant",
+    inputs: [
+      { name: "tripId", type: "uint256" },
+      { name: "newParticipant", type: "address" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  // ─── event: ParticipantAdded (MoaArcTreasury v3) ─────────────────────────
+  {
+    type: "event",
+    name: "ParticipantAdded",
+    inputs: [
+      { name: "tripId", type: "uint256", indexed: true },
+      { name: "newParticipant", type: "address", indexed: true },
+    ],
+  },
+  // ─── view: getTripParticipants ──────────────────────────────────────────
+  {
+    type: "function",
+    name: "getTripParticipants",
+    inputs: [{ name: "tripId", type: "uint256" }],
+    outputs: [{ name: "", type: "address[]" }],
+    stateMutability: "view",
+  },
 ] as const;
 
 export const ERC20_ABI = [

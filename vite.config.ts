@@ -12,6 +12,9 @@ export default defineConfig({
     dedupe: ['react', 'react-dom'],
   },
   optimizeDeps: {
+    // Listing every eagerly-needed package here prevents Vite from
+    // discovering them at runtime and invalidating the pre-bundle hash,
+    // which would cause 404s on cached chunk URLs in the browser.
     include: [
       'react',
       'react-dom',
@@ -29,10 +32,14 @@ export default defineConfig({
       'sonner',
       'clsx',
       'tailwind-merge',
+      'jose',
       'vite-plugin-node-polyfills/shims/buffer',
       'vite-plugin-node-polyfills/shims/global',
       'vite-plugin-node-polyfills/shims/process',
     ],
+    // Ensure arc + arcTestnet are pre-bundled together with viem/chains
+    // so a new VITE_NETWORK=mainnet build does not produce a stale chunk URL.
+    force: false,
   },
   server: {
     host: true,

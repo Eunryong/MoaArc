@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
-    "server": "prisma generate --schema=server/prisma/schema.prisma && DATABASE_URL=\"file:/home/user/app/server/prisma/dev.db\" bun run server/src/index.ts",
+    "server": "prisma generate --schema=server/prisma/schema.prisma && bun run server/src/index.ts",
     "server:dev": "bun --watch run server/src/index.ts",
     "db:generate": "prisma generate --schema=server/prisma/schema.prisma",
     "db:push": "prisma db push --schema=server/prisma/schema.prisma",
@@ -51,6 +51,7 @@
     "viem": "^2.56.3"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.4",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

@@ -1,28 +1,36 @@
 /**
  * wagmi configuration
- * Built with Arc Studio — https://studio.arc.io
+ *
+ * 체인과 RPC는 networkConfig.ts의 NETWORK_CONFIG에서 읽습니다.
+ * 환경변수 VITE_NETWORK=mainnet 으로 Arc mainnet으로 전환합니다.
  */
 
 import { http, fallback, createConfig } from 'wagmi'
-import { arcTestnet } from 'viem/chains'
+import { arc, arcTestnet } from 'viem/chains'
 import { injected } from 'wagmi/connectors'
 import { registerChain } from './tracing'
+import { NETWORK_CONFIG } from './networkConfig'
 
-// Pre-register chain RPC URLs so trace events show correct chain names immediately
-registerChain(arcTestnet.id, arcTestnet.rpcUrls.default.http[0])
+// RPC URLs
+const rpcUrls = NETWORK_CONFIG.rpcUrls
+registerChain(NETWORK_CONFIG.chainId, rpcUrls[0])
 
-// Arc Testnet RPC 엔드포인트 — 첫 번째가 느리거나 타임아웃 시 fallback
-const arcRpc = fallback([
-  http('https://rpc.testnet.arc.io',             { timeout: 30_000 }),
-  http('https://rpc.blockdaemon.testnet.arc.io', { timeout: 30_000 }),
-  http('https://rpc.drpc.testnet.arc.io',        { timeout: 30_000 }),
-])
+const transport = fallback(
+  [...rpcUrls].map((url) => http(url, { timeout: 30_000 }))
+)
 
-export const config = createConfig({
-  chains: [arcTestnet],      // Arc Testnet 전용 — mainnet 제거
-  connectors: [injected()],
-  pollingInterval: 1_000,
-  transports: {
-    [arcTestnet.id]: arcRpc,
-  },
-})
+// wagmi createConfig requires a statically-known chain tuple and matching
+// transports key — use a conditional so TypeScript sees each branch.
+export const config = NETWORK_CONFIG.isMainnet
+  ? createConfig({
+      chains: [arc],
+      connectors: [injected()],
+      pollingInterval: 1_000,
+      transports: { [arc.id]: transport },
+    })
+  : createConfig({
+      chains: [arcTestnet],
+      connectors: [injected()],
+      pollingInterval: 1_000,
+      transports: { [arcTestnet.id]: transport },
+    })

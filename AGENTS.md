@@ -49,7 +49,10 @@ Constructor args: `["0x3600000000000000000000000000000000000000"]` (Arc USDC)
 - Requires wallet connection (Arc Testnet, Chain ID 5042002)
 - Role switching DISABLED — wallet address auto-identifies participant
 - Non-participants: read-only
-- Real transactions: deposit, releaseBudget, returnUnusedBudget, payDeficit, approveFinalSettlement, claimRefund
+- Real transactions: deposit, releaseBudget, returnUnusedBudget, payDeficit, approveFinalSettlement, claimRefund, **addParticipant**
+- Auth: Bearer JWT only — no STUDIO_TEST_MODE, no ?as= bypass, no cookie/X-Auth-Token paths
+- ParticipantId model: A/B/C/D fixed slots (max 4). New participants fill empty slots in order.
+- New participants NOT retroactively added to confirmed splits.
 
 ## Tech Stack
 
@@ -67,8 +70,10 @@ Constructor args: `["0x3600000000000000000000000000000000000000"]` (Arc USDC)
 - `src/App.tsx` - Main app (DEMO/TESTNET mode, 5 tabs)
 - `src/types.ts` - Domain types (all amounts bigint, ItineraryItem, AgentMessage, AppMode)
 - `src/contractAbi.ts` - MOAARK_ADDRESS + MOAARK_ABI + ERC20_ABI
-- `src/useContractWrite.ts` - Onchain write hooks (deposit, releaseBudget, returnUnusedBudget, payDeficit, approveFinalSettlement, claimRefund, createTrip)
-- `src/useContractState.ts` - Onchain read hooks (tripBalance, depositedAmount, allocatedBudget, isParticipant, settlementStatus, usdcBalance, etc.)
+- `src/networkConfig.ts` - Network/contract config. VITE_NETWORK=testnet|mainnet; mainnet requires VITE_CONTRACT_ADDRESS/VITE_USDC_ADDRESS/VITE_CHAIN_ID or all writes are blocked.
+- `src/ErrorBoundary.tsx` - Top-level error boundary (prevents silent white screen)
+- `src/useContractWrite.ts` - Onchain write hooks. Each hook accepts contractAddress param; legacy trips (wrong address) are rejected before signing. simulateContract+receipt.status on every write.
+- `src/useContractState.ts` - Onchain read hooks (tripBalance, depositedAmount, allocatedBudget, isParticipant, settlementStatus, usdcBalance, etc.); legacy trips disabled automatically.
 - `src/calculations.ts` - All bigint math (fmtUsdc, parseUsdcInput, validateShares, applyProportionalRefund, etc.)
 - `src/demoData.ts` - DEMO_TRIP, DEMO_ITINERARY, DEMO_AGENT_MESSAGES, createEmptyTestnetTrip
 - `src/components/ItineraryTab.tsx` - Itinerary list + agent chat tab (NEW)
@@ -94,5 +99,5 @@ bun run dev
 
 ```bash
 bun run contracts:build   # forge build
-bun run contracts:test    # forge test (42 tests pass)
+bun run contracts:test    # forge test (75 tests pass — 53 unit + 2 invariant)
 ```
