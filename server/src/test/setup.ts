@@ -65,25 +65,32 @@ function resolvePrismaCli(): string {
 
 const PRISMA_CLI = resolvePrismaCli();
 
-// ─── Node 실행 파일 ───────────────────────────────────────────────────────────
-// Prisma CLI는 node로 실행해야 합니다 (bun과 호환 문제 방지).
-// 1순위: PATH에서 node를 찾음 (which node / where node)
-// 2순위: 플랫폼 공통 후보 경로
-// 3순위: process.execPath가 node 계열이면 사용
-function resolveNodeBin(): string {
-  // 1순위: PATH 탐색
-  try {
-    const cmd = process.platform === "win32" ? "where node" : "which node";
-    const found = execSync(cmd, { stdio: ["pipe", "pipe", "pipe"] })
-      .toString()
-      .split("\n")[0]
-      .trim();
-    if (found && existsSync(found)) return found;
-  } catch {
-    // which/where 실패 — 후보 경로로 계속
+// ─── JS 런타임 실행 파일 ──────────────────────────────────────────────────────
+// Prisma CLI(node_modules/prisma/build/index.js)는 Node.js 또는 Bun으로 실행할 수 있습니다.
+// Bun도 Node.js 호환 모드로 Prisma CLI db push를 정상 실행합니다(실제 검증 완료).
+//
+// 탐색 순서:
+//   1) which node   — PATH 탐색, Node.js 우선
+//   2) which bun    — Node.js가 없으면 Bun 사용
+//   3) 플랫폼별 후보 경로 (Homebrew, Nix, 표준 Linux 위치)
+//   4) process.execPath — node 또는 bun이면 허용
+//      (bun test 중에는 /usr/local/bin/bun이 반환됨 — 허용 목록에 포함)
+function resolveJsRuntime(): string {
+  // 1~2순위: PATH에서 node, bun 순으로 탐색
+  for (const bin of ["node", "bun"]) {
+    try {
+      const cmd = process.platform === "win32" ? `where ${bin}` : `which ${bin}`;
+      const found = execSync(cmd, { stdio: ["pipe", "pipe", "pipe"] })
+        .toString()
+        .split("\n")[0]
+        .trim();
+      if (found && existsSync(found)) return found;
+    } catch {
+      // 해당 런타임 없음 — 다음 후보로
+    }
   }
 
-  // 2순위: 플랫폼별 공통 후보 경로
+  // 3순위: 플랫폼별 공통 후보 경로 (node 먼저, bun 다음)
   const candidates =
     process.platform === "win32"
       ? [
@@ -93,28 +100,36 @@ function resolveNodeBin(): string {
       : [
           "/usr/local/bin/node",
           "/usr/bin/node",
-          "/opt/homebrew/bin/node",       // macOS ARM Homebrew
+          "/opt/homebrew/bin/node",            // macOS ARM Homebrew
           "/opt/homebrew/opt/node/bin/node",
-          "/usr/local/opt/node/bin/node",  // macOS Intel Homebrew
+          "/usr/local/opt/node/bin/node",       // macOS Intel Homebrew
           "/nix/var/nix/profiles/default/bin/node", // Nix
+          "/usr/local/bin/bun",                 // bun 기본 설치 위치
+          "/opt/homebrew/bin/bun",              // macOS Homebrew bun
         ];
 
   for (const c of candidates) {
     if (existsSync(c)) return c;
   }
 
-  // 3순위: process.execPath가 node 계열이면 허용
+  // 4순위: process.execPath — node 또는 bun이면 허용
+  // bun test 실행 시 process.execPath === '/usr/local/bin/bun'이 되므로 bun도 허용
   const ep = process.execPath;
-  if (path.basename(ep).startsWith("node") && existsSync(ep)) return ep;
+  const epBase = path.basename(ep);
+  if ((epBase.startsWith("node") || epBase.startsWith("bun")) && existsSync(ep)) {
+    return ep;
+  }
 
   throw new Error(
-    `[setup.ts] Node.js executable not found.\n` +
-    `'which node' returned nothing, and none of the fallback paths exist.\n` +
-    `Make sure Node.js is installed and available in PATH.`
+    `[setup.ts] No JS runtime (node or bun) found.\n` +
+    `'which node' and 'which bun' returned nothing, ` +
+    `none of the fallback paths exist, ` +
+    `and process.execPath ('${process.execPath}') is neither node nor bun.\n` +
+    `Make sure Node.js or Bun is installed and available in PATH.`
   );
 }
 
-const NODE_BIN = resolveNodeBin();
+const JS_RUNTIME = resolveJsRuntime();
 
 // ─── createTestDb ─────────────────────────────────────────────────────────────
 
@@ -150,11 +165,11 @@ export function createTestDb(label: string): {
       DATABASE_URL: dbUrl,
     };
 
-    // execFileSync로 node + Prisma CLI 직접 호출
+    // execFileSync로 JS 런타임 + Prisma CLI 직접 호출
     // cwd=tmpSchemaDir → .env 탐색 기준이 /tmp 아래, .env 없음
     try {
       execFileSync(
-        NODE_BIN,
+        JS_RUNTIME,
         [
           PRISMA_CLI,
           "db", "push",
