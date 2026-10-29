@@ -2,12 +2,12 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useI18n } from "./i18n";
 import { useAccount, useChainId, useSignMessage, useSwitchChain } from "wagmi";
 import { ConnectKitButton } from "connectkit";
-import { arcTestnet } from "viem/chains";
 import type { ParticipantId, Trip, AgentMessage, ExpenseCategory } from "./types";
 import { calcParticipantSummary } from "./calculations";
-import { MOAARK_ADDRESS } from "./contractAbi";
+import { NETWORK_CONFIG, addressExplorerUrl, CONFIG_VALID } from "./networkConfig";
 import {
   useServerHealth,
+  useNetworkMatch,
   useAuthState,
   useMyTrips,
   useTripItinerary,
@@ -90,6 +90,8 @@ export default function App() {
 
   // ─── 서버 상태 ─────────────────────────────────────────────────────────
   const { serverOnline, geminiConfigured, checking: serverChecking } = useServerHealth();
+  // 서버 네트워크 일치 확인 — 불일치 시 지갑 서명 차단
+  const { networkReady, errors: networkErrors } = useNetworkMatch(serverOnline);
   const { isAuthenticated, isExpired, refresh: refreshAuth, markExpired } = useAuthState(address);
 
   // ─── 여행방 목록 ───────────────────────────────────────────────────────
@@ -280,8 +282,8 @@ export default function App() {
     const prev = prevChainIdRef.current;
     prevChainIdRef.current = chainId;
 
-    const arcTestnetId = 5042002;
-    if (prev !== chainId && chainId === arcTestnetId && prev !== arcTestnetId) {
+    const targetChainId = NETWORK_CONFIG.chainId;
+    if (prev !== chainId && chainId === targetChainId && prev !== targetChainId) {
       // Arc Testnet으로 전환됨 — stale 오류 모두 제거
       setAuthError(null);
       clearTripsError();
@@ -328,7 +330,7 @@ export default function App() {
   const currentUserId: ParticipantId = connectedParticipant?.id ?? "A";
   const currentParticipant = trip?.participants.find((p) => p.id === currentUserId) ?? null;
   const summary = trip ? calcParticipantSummary(trip, currentUserId) : null;
-  const isWrongChain = isConnected && chainId !== arcTestnet.id;
+  const isWrongChain = isConnected && chainId !== NETWORK_CONFIG.chainId;
   const isParticipant = isConnected && !!connectedParticipant;
   const isNonParticipant = isConnected && !connectedParticipant && !!trip;
 
@@ -345,16 +347,19 @@ export default function App() {
               </h1>
               <p className="text-xs text-stone-400">
                 <span className="font-mono">
-                  {MOAARK_ADDRESS.slice(0, 6)}…{MOAARK_ADDRESS.slice(-4)}
+                  {NETWORK_CONFIG.contractAddress.slice(0, 6)}…{NETWORK_CONFIG.contractAddress.slice(-4)}
                 </span>
                 {" · "}
                 <a
-                  href={`https://explorer.testnet.arc.io/address/${MOAARK_ADDRESS}`}
+                  href={addressExplorerUrl(NETWORK_CONFIG.contractAddress)}
                   target="_blank" rel="noreferrer"
                   className="text-indigo-500 hover:underline"
                 >
-                  Arc Explorer ↗
+                  {NETWORK_CONFIG.isMainnet ? "Arc Explorer ↗" : "Arc Testnet Explorer ↗"}
                 </a>
+                {!CONFIG_VALID && (
+                  <span className="ml-2 text-rose-500 font-semibold">⚠ 네트워크 설정 오류</span>
+                )}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -383,7 +388,7 @@ export default function App() {
               <div className="flex items-center justify-between gap-2">
                 <span>⚠️ {t("wrong_chain")} (current: {chainId})</span>
                 <button
-                  onClick={() => switchChain({ chainId: arcTestnet.id })}
+                  onClick={() => switchChain({ chainId: NETWORK_CONFIG.chainId })}
                   disabled={isSwitchingChain}
                   className="shrink-0 px-2 py-1 rounded-full bg-rose-600 text-white font-semibold hover:bg-rose-700 disabled:opacity-50"
                 >
@@ -395,15 +400,37 @@ export default function App() {
                   {switchChainError.message.includes("rejected") || switchChainError.message.includes("denied")
                     ? "Wallet rejected the network switch."
                     : switchChainError.message.includes("Unrecognized chain")
-                      ? "Wallet does not recognise Arc Testnet. Add it manually and try again."
-                      : "Network switch failed. Please switch to Arc Testnet manually in your wallet."}
+                      ? `Wallet does not recognise this network (chainId ${NETWORK_CONFIG.chainId}). Add it manually and try again.`
+                      : `Network switch failed. Please switch to chainId ${NETWORK_CONFIG.chainId} manually in your wallet.`}
                 </p>
               )}
             </div>
           )}
 
-          {/* 로그인 UI — 올바른 체인이고 미인증일 때만 표시 */}
-          {isConnected && !isWrongChain && !isAuthenticated && serverOnline && (
+          {/* 네트워크 불일치 경고 — 서버 온라인이고 불일치이면 표시 */}
+          {serverOnline && !networkReady && networkErrors.length > 0 && (
+            <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
+              ⚠️ {t("network_mismatch_banner")}
+              {networkErrors.map((errKey, i) => (
+                <div key={i} className="font-mono mt-0.5">
+                  {errKey === "network_status_unavailable" ? t("network_status_unavailable")
+                    : errKey === "network_pending" ? t("network_pending")
+                    : errKey.startsWith("network_chain_mismatch:") ? (() => {
+                        const [, sv, cl] = errKey.split(":");
+                        return t("network_chain_mismatch", { server: sv ?? "", client: cl ?? "" });
+                      })()
+                    : errKey.startsWith("network_contract_mismatch:") ? (() => {
+                        const [, sv, cl] = errKey.split(":");
+                        return t("network_contract_mismatch", { server: sv ?? "", client: cl ?? "" });
+                      })()
+                    : errKey}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 로그인 UI — 올바른 체인이고 미인증이고 네트워크 일치 시 표시 */}
+          {isConnected && !isWrongChain && !isAuthenticated && serverOnline && networkReady && (
             <div className={`mb-2 border rounded-lg px-3 py-2 flex items-center justify-between ${
               isExpired
                 ? "bg-amber-50 border-amber-200"
@@ -418,7 +445,7 @@ export default function App() {
               </span>
               <button
                 onClick={() => { void handleWalletLogin(); }}
-                disabled={authLoading}
+                disabled={authLoading || !networkReady}
                 className={`ml-3 px-3 py-1 rounded-full text-xs font-semibold text-white disabled:opacity-50 ${
                   isExpired
                     ? "bg-amber-600 hover:bg-amber-700"
@@ -697,7 +724,7 @@ export default function App() {
             dbTripId={selectedDbTripId ?? ""}
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
-            onParticipantAdded={reloadTrips}
+            onParticipantAdded={() => { void reloadTrips(); }}
             connectedAddress={address}
             isWrongChain={isWrongChain}
           />
@@ -716,7 +743,7 @@ export default function App() {
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
             dbTripId={selectedDbTripId ?? ""}
-            onExpenseReload={reloadExpenses}
+            onExpenseReload={() => { void reloadExpenses(); }}
             allTrips={serverTrips ?? []}
             onTripSelect={setSelectedDbTripId}
           />
@@ -760,8 +787,9 @@ export default function App() {
       <footer className="border-t border-stone-200 bg-white py-3 px-4">
         <div className="max-w-4xl mx-auto text-xs text-stone-400 space-y-0.5">
           <p>
-            MoaArcTreasury: <span className="font-mono">{MOAARK_ADDRESS}</span> ·
-            Arc Testnet (MoaArcTreasury v2.0)
+            MoaArcTreasury: <span className="font-mono">{NETWORK_CONFIG.contractAddress}</span>
+            {" · "}{NETWORK_CONFIG.isMainnet ? "Arc Mainnet" : "Arc Testnet"}
+            {" · "}{NETWORK_CONFIG.contractVersion}
           </p>
           {!serverChecking && (
             <p className={serverOnline ? "text-emerald-600 font-medium" : "text-amber-500 font-medium"}>

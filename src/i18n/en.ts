@@ -330,6 +330,17 @@ const en = {
   wallet_address_placeholder: "0x wallet address",
   add_participant_btn: "Add participant",
 
+  // ── Network match banner ─────────────────────────────────────────
+  network_mismatch_banner: "Server network mismatch — wallet signing is disabled.",
+  network_status_unavailable: "Cannot reach server network status — wallet signing is disabled.",
+  network_pending: "Server network verification in progress…",
+  network_chain_mismatch: "Server chainId {{server}} ≠ client {{client}}",
+  network_contract_mismatch: "Server contract {{server}} ≠ client {{client}}",
+
+  // ── Settlement: onchain not connected ────────────────────────────
+  settlement_onchain_not_connected: "Onchain settlement is not connected yet.",
+  settlement_onchain_not_connected_desc: "Propose, approve, pay-deficit, and claim-refund will be enabled once onchain settlement is deployed.",
+
   // ── Footer ───────────────────────────────────────────────────────
   footer_disclaimer: "MoaArc runs on Arc Testnet. All transactions use test USDC and have no real monetary value.",
   // add participant errors

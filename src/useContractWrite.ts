@@ -17,8 +17,15 @@ import {
   useAccount,
   useSimulateContract,
 } from "wagmi";
-import { MOAARK_ADDRESS, MOAARK_ABI, ERC20_ABI, USDC_ADDRESS } from "./contractAbi";
+import { MOAARK_ABI, ERC20_ABI } from "./contractAbi";
 import { NETWORK_CONFIG, CONFIG_VALID, txExplorerUrl as explorerUrl } from "./networkConfig";
+import { getNetworkStatus } from "./apiClient";
+
+// Always read live addresses from NETWORK_CONFIG — contractAbi.ts re-exports
+// these same values, but importing directly here avoids any circular risk.
+const MOAARK_ADDRESS = NETWORK_CONFIG.contractAddress;
+const USDC_ADDRESS   = NETWORK_CONFIG.usdcAddress;
+const CHAIN_ID       = NETWORK_CONFIG.chainId;
 
 export type TxStatus = "idle" | "approving" | "waiting_approval" | "pending" | "success" | "error";
 
@@ -58,25 +65,74 @@ async function waitAndVerify(
 }
 
 /**
- * 현재 방이 현재 배포 컨트랙트와 일치하는지 확인.
- * tripContractAddress가 없으면(레거시) 차단.
+ * 현재 방이 현재 배포 컨트랙트 + chainId와 일치하는지 확인.
+ * tripContractAddress 미제공 또는 주소/체인 불일치이면 레거시로 간주.
  */
-export function isLegacyTrip(tripContractAddress: string | undefined): boolean {
+export function isLegacyTrip(
+  tripContractAddress: string | undefined,
+  tripChainId?: number
+): boolean {
   if (!tripContractAddress) return true;
-  return tripContractAddress.toLowerCase() !== NETWORK_CONFIG.contractAddress.toLowerCase();
+  if (tripContractAddress.toLowerCase() !== NETWORK_CONFIG.contractAddress.toLowerCase()) return true;
+  // chainId가 전달됐으면 네트워크도 검사
+  if (tripChainId !== undefined && tripChainId !== CHAIN_ID) return true;
+  return false;
+}
+
+/**
+ * simulateContract로 revert를 사전 감지합니다.
+ * 성공 시 void 반환, 실패 시 ContractFunctionRevertedError를 throw합니다.
+ */
+async function simulate(
+  publicClient: NonNullable<ReturnType<typeof usePublicClient>>,
+  params: Parameters<typeof publicClient.simulateContract>[0]
+) {
+  await publicClient.simulateContract(params);
 }
 
 const LEGACY_BLOCKED_MSG =
   "이 여행방은 이전 컨트랙트를 사용합니다. 새 여행방을 만들어 v3 기능을 사용하세요.";
 const CONFIG_INVALID_MSG =
   "컨트랙트 설정이 완료되지 않았습니다. 환경변수를 확인하세요.";
+const BACKEND_MISMATCH_MSG =
+  "서버 네트워크 설정이 클라이언트와 일치하지 않습니다. 페이지를 새로고침하거나 관리자에게 문의하세요.";
+
+/**
+ * 지갑 서명(write) 직전: /api/network를 호출하고 서버-클라이언트 설정이
+ * 완전히 일치하는지 확인합니다.
+ *
+ * 서버가 오프라인이거나 status≠ok이거나 chainId/contractAddress/usdcAddress/version 중
+ * 하나라도 다르면 throw해서 writeContractAsync 호출을 막습니다.
+ * 이 함수가 throw하면 RPC 시뮬레이션·지갑 호출 0회가 보장됩니다.
+ */
+async function assertBackendNetworkMatches(): Promise<void> {
+  const ns = await getNetworkStatus();
+  if (!ns) throw new Error(BACKEND_MISMATCH_MSG);
+  if (ns.status !== "ok") throw new Error(BACKEND_MISMATCH_MSG);
+  // 필수 필드 누락
+  if (ns.chainId === undefined || !ns.contractAddress || !ns.usdcAddress || !ns.version) {
+    throw new Error(BACKEND_MISMATCH_MSG);
+  }
+  // chainId 일치
+  if (ns.chainId !== NETWORK_CONFIG.chainId) throw new Error(BACKEND_MISMATCH_MSG);
+  // contractAddress 일치
+  if (ns.contractAddress.toLowerCase() !== NETWORK_CONFIG.contractAddress.toLowerCase()) {
+    throw new Error(BACKEND_MISMATCH_MSG);
+  }
+  // usdcAddress 일치
+  if (ns.usdcAddress.toLowerCase() !== NETWORK_CONFIG.usdcAddress.toLowerCase()) {
+    throw new Error(BACKEND_MISMATCH_MSG);
+  }
+  // version 일치
+  if (ns.version !== NETWORK_CONFIG.contractVersion) throw new Error(BACKEND_MISMATCH_MSG);
+}
 
 // ─── useDeposit ───────────────────────────────────────────────────────────────
 
 export function useDeposit(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
   const { address } = useAccount();
 
   const execute = useCallback(
@@ -87,25 +143,32 @@ export function useDeposit(tripId: bigint, tripContractAddress?: string) {
 
       setState({ status: "approving" });
       try {
+        await assertBackendNetworkMatches();
         // Step 1: approve USDC
         const approveTx = await writeContractAsync({
           address: USDC_ADDRESS,
           abi: ERC20_ABI,
           functionName: "approve",
           args: [MOAARK_ADDRESS, amount],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "approving", approveTxHash: approveTx });
         await waitAndVerify(publicClient, approveTx, "USDC approve");
 
-        // Step 2: deposit
+        // Step 2: re-check server state after approve completes, then simulate + sign deposit
         setState({ status: "waiting_approval", approveTxHash: approveTx });
+        await assertBackendNetworkMatches();
+        await simulate(publicClient, {
+          address: MOAARK_ADDRESS, abi: MOAARK_ABI,
+          functionName: "deposit", args: [tripId, amount],
+          account: address,
+        });
         const depositTx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
           functionName: "deposit",
           args: [tripId, amount],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "pending", approveTxHash: approveTx, txHash: depositTx });
         await waitAndVerify(publicClient, depositTx, "deposit");
@@ -125,7 +188,7 @@ export function useDeposit(tripId: bigint, tripContractAddress?: string) {
 export function useReleaseBudget(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
   const execute = useCallback(
     async (spender: `0x${string}`, amount: bigint, memo: string) => {
@@ -135,12 +198,17 @@ export function useReleaseBudget(tripId: bigint, tripContractAddress?: string) {
 
       setState({ status: "waiting_approval" });
       try {
+        await assertBackendNetworkMatches();
+        await simulate(publicClient, {
+          address: MOAARK_ADDRESS, abi: MOAARK_ABI,
+          functionName: "releaseBudget", args: [tripId, spender, amount, memo],
+        });
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
           functionName: "releaseBudget",
           args: [tripId, spender, amount, memo],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "pending", txHash: tx });
         await waitAndVerify(publicClient, tx, "releaseBudget");
@@ -160,7 +228,7 @@ export function useReleaseBudget(tripId: bigint, tripContractAddress?: string) {
 export function useReturnUnusedBudget(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
   const { address } = useAccount();
 
   const execute = useCallback(
@@ -171,23 +239,26 @@ export function useReturnUnusedBudget(tripId: bigint, tripContractAddress?: stri
 
       setState({ status: "approving" });
       try {
+        await assertBackendNetworkMatches();
         const approveTx = await writeContractAsync({
           address: USDC_ADDRESS,
           abi: ERC20_ABI,
           functionName: "approve",
           args: [MOAARK_ADDRESS, amount],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "approving", approveTxHash: approveTx });
         await waitAndVerify(publicClient, approveTx, "USDC approve");
 
+        // Re-check server state after approve completes
         setState({ status: "waiting_approval", approveTxHash: approveTx });
+        await assertBackendNetworkMatches();
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
           functionName: "returnUnusedBudget",
           args: [tripId, amount],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "pending", approveTxHash: approveTx, txHash: tx });
         await waitAndVerify(publicClient, tx, "returnUnusedBudget");
@@ -207,7 +278,7 @@ export function useReturnUnusedBudget(tripId: bigint, tripContractAddress?: stri
 export function usePayDeficit(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
   const { address } = useAccount();
 
   const execute = useCallback(
@@ -218,23 +289,26 @@ export function usePayDeficit(tripId: bigint, tripContractAddress?: string) {
 
       setState({ status: "approving" });
       try {
+        await assertBackendNetworkMatches();
         const approveTx = await writeContractAsync({
           address: USDC_ADDRESS,
           abi: ERC20_ABI,
           functionName: "approve",
           args: [MOAARK_ADDRESS, amount],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "approving", approveTxHash: approveTx });
         await waitAndVerify(publicClient, approveTx, "USDC approve");
 
+        // Re-check server state after approve completes
         setState({ status: "waiting_approval", approveTxHash: approveTx });
+        await assertBackendNetworkMatches();
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
           functionName: "payDeficit",
           args: [tripId, amount],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "pending", approveTxHash: approveTx, txHash: tx });
         await waitAndVerify(publicClient, tx, "payDeficit");
@@ -254,7 +328,7 @@ export function usePayDeficit(tripId: bigint, tripContractAddress?: string) {
 export function useApproveFinalSettlement(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
   const execute = useCallback(
     async (ledgerHash: `0x${string}`) => {
@@ -264,12 +338,17 @@ export function useApproveFinalSettlement(tripId: bigint, tripContractAddress?: 
 
       setState({ status: "waiting_approval" });
       try {
+        await assertBackendNetworkMatches();
+        await simulate(publicClient, {
+          address: MOAARK_ADDRESS, abi: MOAARK_ABI,
+          functionName: "approveFinalSettlement", args: [tripId, ledgerHash],
+        });
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
           functionName: "approveFinalSettlement",
           args: [tripId, ledgerHash],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "pending", txHash: tx });
         await waitAndVerify(publicClient, tx, "approveFinalSettlement");
@@ -289,7 +368,7 @@ export function useApproveFinalSettlement(tripId: bigint, tripContractAddress?: 
 export function useClaimRefund(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
   const execute = useCallback(async () => {
     if (!publicClient) { setState({ status: "error", errorMessage: "RPC 연결 없음" }); return; }
@@ -298,12 +377,17 @@ export function useClaimRefund(tripId: bigint, tripContractAddress?: string) {
 
     setState({ status: "waiting_approval" });
     try {
+      await assertBackendNetworkMatches();
+      await simulate(publicClient, {
+        address: MOAARK_ADDRESS, abi: MOAARK_ABI,
+        functionName: "claimRefund", args: [tripId],
+      });
       const tx = await writeContractAsync({
         address: MOAARK_ADDRESS,
         abi: MOAARK_ABI,
         functionName: "claimRefund",
         args: [tripId],
-        chainId: NETWORK_CONFIG.chainId,
+        chainId: CHAIN_ID,
       });
       setState({ status: "pending", txHash: tx });
       await waitAndVerify(publicClient, tx, "claimRefund");
@@ -321,7 +405,7 @@ export function useClaimRefund(tripId: bigint, tripContractAddress?: string) {
 export function useRecordActualSpend(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
   const execute = useCallback(
     async (amount: bigint, memo: string) => {
@@ -331,12 +415,13 @@ export function useRecordActualSpend(tripId: bigint, tripContractAddress?: strin
 
       setState({ status: "waiting_approval" });
       try {
+        await assertBackendNetworkMatches();
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
           functionName: "recordActualSpend",
           args: [tripId, amount, memo],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "pending", txHash: tx });
         await waitAndVerify(publicClient, tx, "recordActualSpend");
@@ -356,7 +441,7 @@ export function useRecordActualSpend(tripId: bigint, tripContractAddress?: strin
 export function useCreateTrip() {
   const [state, setState] = useState<TxState & { tripId?: bigint }>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
   const execute = useCallback(
     async (name: string, participants: `0x${string}`[], targetBudget: bigint) => {
@@ -365,6 +450,7 @@ export function useCreateTrip() {
 
       setState({ status: "waiting_approval" });
       try {
+        await assertBackendNetworkMatches();
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
@@ -397,7 +483,7 @@ export function useCreateTrip() {
 export function useCancelSettlement(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
   const execute = useCallback(async () => {
     if (!publicClient) { setState({ status: "error", errorMessage: "RPC 연결 없음" }); return; }
@@ -406,12 +492,17 @@ export function useCancelSettlement(tripId: bigint, tripContractAddress?: string
 
     setState({ status: "waiting_approval" });
     try {
+      await assertBackendNetworkMatches();
+      await simulate(publicClient, {
+        address: MOAARK_ADDRESS, abi: MOAARK_ABI,
+        functionName: "cancelSettlement", args: [tripId],
+      });
       const tx = await writeContractAsync({
         address: MOAARK_ADDRESS,
         abi: MOAARK_ABI,
         functionName: "cancelSettlement",
         args: [tripId],
-        chainId: NETWORK_CONFIG.chainId,
+        chainId: CHAIN_ID,
       });
       setState({ status: "pending", txHash: tx });
       await waitAndVerify(publicClient, tx, "cancelSettlement");
@@ -437,7 +528,7 @@ export interface AddParticipantState extends TxState {
 export function useAddParticipant(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<AddParticipantState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
-  const publicClient = usePublicClient({ chainId: NETWORK_CONFIG.chainId });
+  const publicClient = usePublicClient({ chainId: CHAIN_ID });
 
   const execute = useCallback(
     async (newParticipant: `0x${string}`): Promise<`0x${string}` | null> => {
@@ -451,12 +542,17 @@ export function useAddParticipant(tripId: bigint, tripContractAddress?: string) 
 
       setState({ status: "waiting_approval" });
       try {
+        await assertBackendNetworkMatches();
+        await simulate(publicClient, {
+          address: MOAARK_ADDRESS, abi: MOAARK_ABI,
+          functionName: "addParticipant", args: [tripId, newParticipant],
+        });
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
           functionName: "addParticipant",
           args: [tripId, newParticipant],
-          chainId: NETWORK_CONFIG.chainId,
+          chainId: CHAIN_ID,
         });
         setState({ status: "pending", txHash: tx });
         await waitAndVerify(publicClient, tx, "addParticipant");

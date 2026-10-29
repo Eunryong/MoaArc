@@ -22,6 +22,7 @@
 
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import type { MiddlewareHandler } from "hono";
 
 // BigInt를 JSON으로 직렬화할 수 없는 문제 전역 처리
 // Prisma BigInt 필드(targetBudget, estMinUsdc 등)를 문자열로 반환합니다.
@@ -36,7 +37,12 @@ import auth from "./routes/auth.js";
 import trips from "./routes/trips.js";
 import agent from "./routes/agent.js";
 import intent from "./routes/intent.js";
-import { verifyServerNetworkConfig, ACTIVE_CHAIN_ID } from "./lib/chain.js";
+import {
+  verifyServerNetworkConfig,
+  getNetworkVerification,
+  isNetworkReady,
+  ACTIVE_CHAIN_ID,
+} from "./lib/chain.js";
 
 const app = new Hono();
 
@@ -108,6 +114,51 @@ app.get("/api/health", (c) => {
   });
 });
 
+// ─── /api/network — 공개 네트워크/컨트랙트 검증 결과 ────────────────────────────
+// 반환값에는 민감 정보(토큰, 키, RPC URL) 없음.
+// 프런트엔드는 이 엔드포인트로 서버 체인 설정을 확인하고 지갑 서명을 허용합니다.
+app.get("/api/network", (c) => {
+  const v = getNetworkVerification();
+  if (!v) {
+    return c.json({
+      status: "pending",
+      message: "네트워크 검증이 아직 완료되지 않았습니다.",
+    }, 503);
+  }
+  return c.json({
+    status: v.ok ? "ok" : "mismatch",
+    network: v.network,
+    contractAddress: v.contractAddress,
+    chainId: v.chainId,
+    version: v.version,
+    usdcAddress: v.usdcAddress,
+    usdcDecimals: v.usdcDecimals,
+    errors: v.ok ? [] : v.errors,
+  }, v.ok ? 200 : 503);
+});
+
+// ─── write API 네트워크 미들웨어 ────────────────────────────────────────────────
+// 검증 결과가 없거나 ok=false이면 503을 반환합니다.
+// /api/auth, /api/health, /api/network는 차단 제외.
+// 테스트에서는 _setVerificationResultForTest()로 결과를 주입한 뒤 이 미들웨어를 통과합니다.
+//
+// 주의: Hono "/api/trips/*" 패턴은 "/api/trips"(후행 슬래시 없음)에 매칭되지 않습니다.
+// 두 패턴을 모두 등록합니다.
+const networkGuard: MiddlewareHandler = async (c, next) => {
+  const check = isNetworkReady();
+  if (!check.ready) {
+    return c.json({ error: check.reason }, 503);
+  }
+  await next();
+};
+
+// Hono의 "/api/trips/*" 패턴은 "/api/trips"(후행 슬래시 없음)에 매칭 안 됨.
+// 두 패턴을 모두 등록합니다.
+app.use("/api/trips", networkGuard);
+app.use("/api/trips/*", networkGuard);
+app.use("/api/intent", networkGuard);
+app.use("/api/intent/*", networkGuard);
+
 // ─── 라우터 등록 ──────────────────────────────────────────────────────────────
 app.route("/api/auth", auth);
 app.route("/api/trips", trips);
@@ -140,18 +191,24 @@ if (process.env.NODE_ENV !== "test") {
   serve({ fetch: app.fetch, port });
 
   // 비동기 네트워크 설정 검증 (서버 실행 차단 안 함)
+  // 완료 전까지 /api/trips/* 와 /api/intent/* 는 503 반환 (isNetworkReady() 미들웨어)
   verifyServerNetworkConfig().then((result) => {
     if (result.ok) {
       console.log(
-        `[chain] network OK — chainId=${result.chainId} version=${result.version} usdcDecimals=${result.usdcDecimals}`
+        `[chain] network OK — network=${result.network} chainId=${result.chainId}` +
+        ` contract=${result.contractAddress} version=${result.version}` +
+        ` usdcDecimals=${result.usdcDecimals}`
       );
     } else {
-      // 오류가 있어도 서버를 종료하지 않음 (read-only 기능 유지).
-      // 프런트엔드의 ACTIVE_CHAIN_ID 불일치는 write 훅이 차단합니다.
-      console.warn(`[chain] network config mismatch (chainId expected=${ACTIVE_CHAIN_ID}):`, result.errors);
+      // 오류가 있으면 write API가 503으로 차단됨 (isNetworkReady() 참조)
+      // 민감값(토큰, RPC URL 파라미터)은 sanitizeError()로 마스킹됨
+      console.error(
+        `[chain] network MISMATCH (chainId expected=${ACTIVE_CHAIN_ID}):`,
+        result.errors
+      );
     }
   }).catch((e: unknown) => {
-    console.warn("[chain] network verification failed:", String(e));
+    console.error("[chain] network verification failed:", String(e));
   });
 }
 

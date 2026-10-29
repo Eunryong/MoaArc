@@ -9,13 +9,21 @@
 //   TripSharedTreasuryV2:      0x3bc08cdabcf702e01b458923a946cd664e438c3e
 //   TripSharedTreasury (V1):   0x0e540064015628b03ec62b44d94721b1b50e5d92
 
-/** Active contract: MoaArcTreasury v3 (Arc Testnet). Read from VITE_CONTRACT_ADDRESS in production. */
-export const MOAARK_ADDRESS = "0xf7a733fb2084b31591a0fbacded683efbe5b6728" as const;
-/** @deprecated MoaArkTreasury v1 — superseded by MoaArcTreasury v2 */
+// NOTE: these live addresses are driven by NETWORK_CONFIG (networkConfig.ts),
+// which reads VITE_CONTRACT_ADDRESS / VITE_USDC_ADDRESS / VITE_NETWORK at build time.
+// Never use these as fallback values — they are re-exported only for components
+// that haven't been migrated to import from networkConfig directly.
+import { NETWORK_CONFIG } from "./networkConfig";
+
+/** Active MoaArcTreasury address for the current build target (testnet or mainnet). */
+export const MOAARK_ADDRESS: `0x${string}` = NETWORK_CONFIG.contractAddress;
+/** USDC ERC-20 address for the current build target. */
+export const USDC_ADDRESS: `0x${string}` = NETWORK_CONFIG.usdcAddress;
+
+/** @deprecated MoaArkTreasury v1 — superseded. Never used in new code. */
 export const MOAARK_V1_ADDRESS = "0x63aff048f159b1712e7c8d728cdc61b004eed40e" as const;
-/** @deprecated TripSharedTreasuryV2 */
+/** @deprecated TripSharedTreasuryV2 — superseded. Never used in new code. */
 export const TREASURY_V2_ADDRESS = "0x3bc08cdabcf702e01b458923a946cd664e438c3e" as const;
-export const USDC_ADDRESS = "0x3600000000000000000000000000000000000000" as const;
 
 export const MOAARK_ABI = [
   // ─── createTrip ─────────────────────────────────────────────────────────

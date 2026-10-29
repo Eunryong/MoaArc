@@ -144,6 +144,33 @@ export async function getHealth(): Promise<HealthStatus | null> {
   }
 }
 
+// ─── 네트워크 검증 상태 ────────────────────────────────────────────────────────
+
+export interface NetworkStatus {
+  status: "ok" | "mismatch" | "pending";
+  network?: string;
+  contractAddress?: string;
+  chainId?: number;
+  version?: string;
+  usdcAddress?: string;
+  usdcDecimals?: number;
+  errors?: string[];
+  message?: string;
+}
+
+/**
+ * 서버 /api/network 결과를 반환합니다.
+ * 서버가 오프라인이면 null을 반환합니다.
+ * 이 정보는 공개 정보이며 민감 값을 포함하지 않습니다.
+ */
+export async function getNetworkStatus(): Promise<NetworkStatus | null> {
+  try {
+    return await apiFetch<NetworkStatus>("/api/network");
+  } catch {
+    return null;
+  }
+}
+
 // ─── 인증 ─────────────────────────────────────────────────────────────────────
 
 export async function fetchNonce(address: string): Promise<string> {

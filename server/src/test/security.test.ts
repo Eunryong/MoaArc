@@ -124,13 +124,30 @@ beforeAll(async () => {
   const appMod = await import("../index.js");
   app = (appMod as { default: HonoApp }).default;
 
-  // 4. app이 사용하는 lib/prisma 싱글턴 — 변수로 보관 (afterAll disconnect용)
+  // 4. 네트워크 검증 결과를 "ready=OK"로 주입합니다.
+  //    이렇게 하면 실제 미들웨어(isNetworkReady)가 동작하면서도 RPC 호출 없이 통과합니다.
+  //    네트워크 미들웨어 자체(503/통과)는 별도 describe에서 _setVerificationResultForTest로
+  //    ready/mismatch/undefined를 주입하며 검증합니다.
+  const chainMod = await import("../lib/chain.js");
+  chainMod._setVerificationResultForTest({
+    ok: true,
+    chainId: 5042002,
+    bytecodePresent: true,
+    version: "MoaArc-3.0",
+    usdcAddress: "0x3600000000000000000000000000000000000000",
+    usdcDecimals: 6,
+    network: "testnet",
+    contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+    errors: [],
+  });
+
+  // 6. app이 사용하는 lib/prisma 싱글턴 — 변수로 보관 (afterAll disconnect용)
   const prismaMod = await import("../lib/prisma.js");
   prisma = prismaMod.prisma as unknown as PrismaLike;
   appPrisma = prismaMod.prisma as unknown as { $disconnect: () => Promise<void> };
   await prisma.$connect();
 
-  // 5. 테스트 JWT (jose — 값 미출력)
+  // 7. 테스트 JWT (jose — 값 미출력)
   const { SignJWT } = await import("jose");
   const secret = new TextEncoder().encode(TEST_JWT_SECRET);
   aliceToken = await new SignJWT({ sub: TEST_ADDRESSES.alice })
@@ -144,7 +161,7 @@ beforeAll(async () => {
     .setExpirationTime("1h")
     .sign(secret);
 
-  // 6. 픽스처 생성
+  // 8. 픽스처 생성
   aliceTrip = await (prisma.tripRecord.create)({
     data: {
       chainId: 5042002,
@@ -780,5 +797,129 @@ describe("addParticipant API 보안", () => {
       }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+// ─── 네트워크 미들웨어 검증 ────────────────────────────────────────────────────
+// _setVerificationResultForTest로 ready/mismatch/undefined를 주입하여
+// 실제 미들웨어 경로(isNetworkReady → 503 or 통과)를 검증합니다.
+// 각 테스트 후 원래 ready 상태로 복원합니다.
+describe("네트워크 readiness 미들웨어", () => {
+  // chain 모듈을 재사용 (이미 beforeAll에서 동적 import됨)
+  let chainMod: {
+    _setVerificationResultForTest: (r: import("../lib/chain.js").ServerNetworkVerification | undefined) => void;
+  };
+
+  const READY_FIXTURE: import("../lib/chain.js").ServerNetworkVerification = {
+    ok: true,
+    chainId: 5042002,
+    bytecodePresent: true,
+    version: "MoaArc-3.0",
+    usdcAddress: "0x3600000000000000000000000000000000000000",
+    usdcDecimals: 6,
+    network: "testnet",
+    contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+    errors: [],
+  };
+
+  beforeAll(async () => {
+    chainMod = await import("../lib/chain.js");
+  });
+
+  // 각 테스트 후 ready 상태로 복원 (다른 테스트 영향 없음)
+  const restoreReady = () => chainMod._setVerificationResultForTest(READY_FIXTURE);
+
+  test("검증 결과가 undefined(아직 시작 전)이면 /api/trips → 503", async () => {
+    chainMod._setVerificationResultForTest(undefined);
+    try {
+      const res = await app.request("/api/trips", {
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(res.status).toBe(503);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain("검증");
+    } finally {
+      restoreReady();
+    }
+  });
+
+  test("ok=false(VERSION 불일치)이면 /api/trips → 503, 오류 메시지 포함", async () => {
+    chainMod._setVerificationResultForTest({
+      ok: false,
+      chainId: 5042002,
+      bytecodePresent: true,
+      version: "MoaArc-2.0",
+      usdcAddress: "0x3600000000000000000000000000000000000000",
+      usdcDecimals: 6,
+      network: "testnet",
+      contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+      errors: ['VERSION "MoaArc-2.0" ≠ 기대값 "MoaArc-3.0"'],
+    });
+    try {
+      const res = await app.request("/api/trips", {
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(res.status).toBe(503);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain("MoaArc-2.0");
+    } finally {
+      restoreReady();
+    }
+  });
+
+  test("ok=false(chainId 불일치)이면 /api/trips → 503", async () => {
+    chainMod._setVerificationResultForTest({
+      ok: false,
+      chainId: 1,           // mainnet chainId (잘못된 값)
+      bytecodePresent: true,
+      version: "MoaArc-3.0",
+      usdcAddress: "0x3600000000000000000000000000000000000000",
+      usdcDecimals: 6,
+      network: "testnet",
+      contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+      errors: ["RPC chainId=1 ≠ 설정값 5042002"],
+    });
+    try {
+      const res = await app.request("/api/trips", {
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(res.status).toBe(503);
+    } finally {
+      restoreReady();
+    }
+  });
+
+  test("ok=false(bytecode 없음 — 잘못된 주소)이면 /api/trips → 503", async () => {
+    chainMod._setVerificationResultForTest({
+      ok: false,
+      chainId: 5042002,
+      bytecodePresent: false,
+      network: "testnet",
+      contractAddress: "0x0000000000000000000000000000000000000001",
+      errors: ["컨트랙트 0x0000000000000000000000000000000000000001에 코드가 없습니다"],
+    });
+    try {
+      const res = await app.request("/api/trips", {
+        headers: { Authorization: `Bearer ${aliceToken}` },
+      });
+      expect(res.status).toBe(503);
+    } finally {
+      restoreReady();
+    }
+  });
+
+  test("ok=true이면 /api/trips → 503 아님 (인증 결과에 따라 200 or 401)", async () => {
+    chainMod._setVerificationResultForTest(READY_FIXTURE);
+    // 인증 없이 요청 → requireAuth가 401 반환 (미들웨어를 통과했다는 증거)
+    const res = await app.request("/api/trips");
+    expect(res.status).not.toBe(503);
+    expect(res.status).toBe(401);
+  });
+
+  test("ok=true이면 /api/intent → 503 아님", async () => {
+    chainMod._setVerificationResultForTest(READY_FIXTURE);
+    // 인증 없이 요청 → 401 (미들웨어 통과 확인)
+    const res = await app.request("/api/intent/someId");
+    expect(res.status).not.toBe(503);
   });
 });

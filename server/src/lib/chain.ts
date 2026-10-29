@@ -99,92 +99,193 @@ function makeClient() {
 
 // ─── 서버 시작 시 RPC 검증 ────────────────────────────────────────────────────
 
+/** 컨트랙트 VERSION() 함수가 반환해야 하는 정확한 문자열 */
+const EXPECTED_VERSION =
+  (process.env.MOARC_CONTRACT_VERSION ?? "MoaArc-3.0");
+
+/** 공식 체인 ID — ACTIVE_CHAIN_ID와 일치해야 함 */
+const OFFICIAL_CHAIN_ID = ACTIVE_CHAIN.id;
+
 export interface ServerNetworkVerification {
   ok: boolean;
   chainId?: number;
   bytecodePresent?: boolean;
   version?: string;
+  usdcAddress?: string;
   usdcDecimals?: number;
+  network: string;
+  contractAddress: string;
   errors: string[];
 }
 
 /**
- * 서버 시작 시 또는 write 라우트 첫 요청 시 호출합니다.
- * RPC eth_chainId, 컨트랙트 bytecode 존재, VERSION() 상수, USDC decimals()를 확인합니다.
- * 불일치가 있으면 ok=false를 반환하고 write 라우트가 차단합니다.
- * 이 함수는 민감값을 로그에 출력하지 않습니다.
+ * 검증 결과 — 서버 시작 시 한 번 실행되어 이 모듈 상태에 캐시됩니다.
+ * undefined = 아직 실행 전 (서버 기동 중)
+ */
+let _verificationResult: ServerNetworkVerification | undefined;
+
+/** 현재 캐시된 검증 결과를 반환합니다. undefined이면 아직 검증 전입니다. */
+export function getNetworkVerification(): ServerNetworkVerification | undefined {
+  return _verificationResult;
+}
+
+/**
+ * 테스트 전용: 검증 결과를 직접 주입합니다.
+ * production 코드에서는 절대 호출하지 마세요 — 테스트 픽스처 setup에서만 사용합니다.
+ * 이 함수를 통해 동일한 미들웨어 경로(isNetworkReady → 503/통과)를 검증합니다.
+ */
+export function _setVerificationResultForTest(
+  result: ServerNetworkVerification | undefined
+): void {
+  _verificationResult = result;
+}
+
+/**
+ * write API 미들웨어에서 호출합니다.
+ * 검증이 완료되지 않았거나 ok=false이면 503을 반환합니다.
+ * 호출자는 false이면 즉시 응답을 반환해야 합니다.
+ */
+export function isNetworkReady(): { ready: true } | { ready: false; reason: string } {
+  if (_verificationResult === undefined) {
+    return { ready: false, reason: "서버 네트워크 검증이 아직 완료되지 않았습니다. 잠시 후 다시 시도하세요." };
+  }
+  if (!_verificationResult.ok) {
+    return { ready: false, reason: `네트워크 불일치: ${_verificationResult.errors.join("; ")}` };
+  }
+  return { ready: true };
+}
+
+/**
+ * 에러 메시지에서 민감 토큰 값을 제거합니다.
+ * RPC URL의 토큰 파라미터(_rpc_token=...)를 마스킹합니다.
+ */
+function sanitizeError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  return raw.replace(/_rpc_token=[^&\s"]+/g, "_rpc_token=***");
+}
+
+/**
+ * 서버 시작 시 호출합니다.
+ * RPC eth_chainId, 공식 체인 ID 일치, 컨트랙트 bytecode 존재,
+ * VERSION() 정확 비교("MoaArc-3.0"), treasury.usdc() 주소 비교, USDC decimals()를 확인합니다.
+ * 결과는 모듈 내부에 캐시되어 write 라우트 미들웨어가 isNetworkReady()로 503 차단합니다.
+ * 이 함수는 민감값(토큰, 키)을 로그에 출력하지 않습니다.
  */
 export async function verifyServerNetworkConfig(): Promise<ServerNetworkVerification> {
   const errors: string[] = [];
   let chainId: number | undefined;
   let bytecodePresent: boolean | undefined;
   let version: string | undefined;
+  let usdcAddress: string | undefined;
   let usdcDecimals: number | undefined;
 
+  let contract: `0x${string}`;
+  let usdc: `0x${string}`;
+
   try {
-    const contract = getMoarcContract();
-    const usdc     = getMoarcUsdc();
-    const client   = makeClient();
-
-    // 1. eth_chainId
-    try {
-      const rpcChainId = await client.getChainId();
-      chainId = rpcChainId;
-      if (rpcChainId !== ACTIVE_CHAIN_ID) {
-        errors.push(`RPC chainId=${rpcChainId} ≠ expected ${ACTIVE_CHAIN_ID}`);
-      }
-    } catch (e) {
-      errors.push(`eth_chainId 실패: ${String(e)}`);
-    }
-
-    // 2. 컨트랙트 bytecode 존재 여부
-    try {
-      const code = await client.getCode({ address: contract });
-      bytecodePresent = !!(code && code.length > 2);
-      if (!bytecodePresent) {
-        errors.push(`컨트랙트 ${contract}에 코드가 없습니다.`);
-      }
-    } catch (e) {
-      errors.push(`getCode 실패: ${String(e)}`);
-    }
-
-    // 3. VERSION() 상수
-    try {
-      const versionAbi = parseAbi(["function VERSION() view returns (string)"]);
-      const v = await client.readContract({
-        address: contract,
-        abi: versionAbi,
-        functionName: "VERSION",
-      }) as string;
-      version = v;
-      if (!v.startsWith("MoaArc")) {
-        errors.push(`VERSION "${v}" 이 "MoaArc"로 시작하지 않습니다.`);
-      }
-    } catch (e) {
-      errors.push(`VERSION() 읽기 실패: ${String(e)}`);
-    }
-
-    // 4. USDC decimals
-    try {
-      const decimalsAbi = parseAbi(["function decimals() view returns (uint8)"]);
-      const d = await client.readContract({
-        address: usdc,
-        abi: decimalsAbi,
-        functionName: "decimals",
-      }) as number;
-      usdcDecimals = d;
-      if (d !== 6) {
-        errors.push(`USDC decimals=${d} ≠ 6`);
-      }
-    } catch (e) {
-      errors.push(`USDC decimals() 읽기 실패: ${String(e)}`);
-    }
-
-  } catch (setup) {
-    errors.push(`설정 오류: ${String(setup)}`);
+    contract = getMoarcContract();
+    usdc     = getMoarcUsdc();
+  } catch (e) {
+    const msg = sanitizeError(e);
+    errors.push(`설정 오류: ${msg}`);
+    const result: ServerNetworkVerification = {
+      ok: false,
+      network: NETWORK,
+      contractAddress: process.env.MOARC_CONTRACT_ADDRESS ?? "(미설정)",
+      errors,
+    };
+    _verificationResult = result;
+    return result;
   }
 
-  return { ok: errors.length === 0, chainId, bytecodePresent, version, usdcDecimals, errors };
+  const client = makeClient();
+
+  // 1. eth_chainId — 설정값 AND 선택 network 공식 id와 모두 일치해야 함
+  try {
+    const rpcChainId = await client.getChainId();
+    chainId = rpcChainId;
+    if (rpcChainId !== ACTIVE_CHAIN_ID) {
+      errors.push(`RPC chainId=${rpcChainId} ≠ 설정값 ${ACTIVE_CHAIN_ID}`);
+    }
+    if (rpcChainId !== OFFICIAL_CHAIN_ID) {
+      errors.push(`RPC chainId=${rpcChainId} ≠ ${NETWORK} 공식 chain id ${OFFICIAL_CHAIN_ID}`);
+    }
+  } catch (e) {
+    errors.push(`eth_chainId 실패: ${sanitizeError(e)}`);
+  }
+
+  // 2. 컨트랙트 bytecode 존재 여부
+  try {
+    const code = await client.getCode({ address: contract });
+    bytecodePresent = !!(code && code.length > 2);
+    if (!bytecodePresent) {
+      errors.push(`컨트랙트 ${contract}에 코드가 없습니다 — 주소가 올바른지 확인하세요.`);
+    }
+  } catch (e) {
+    errors.push(`getCode 실패: ${sanitizeError(e)}`);
+  }
+
+  // 3. VERSION() 정확 비교
+  try {
+    const versionAbi = parseAbi(["function VERSION() view returns (string)"]);
+    const v = await client.readContract({
+      address: contract,
+      abi: versionAbi,
+      functionName: "VERSION",
+    }) as string;
+    version = v;
+    if (v !== EXPECTED_VERSION) {
+      errors.push(`VERSION "${v}" ≠ 기대값 "${EXPECTED_VERSION}"`);
+    }
+  } catch (e) {
+    errors.push(`VERSION() 읽기 실패: ${sanitizeError(e)}`);
+  }
+
+  // 4. treasury.usdc() 주소 비교
+  try {
+    const usdcFnAbi = parseAbi(["function usdc() view returns (address)"]);
+    const onchainUsdc = await client.readContract({
+      address: contract,
+      abi: usdcFnAbi,
+      functionName: "usdc",
+    }) as string;
+    usdcAddress = onchainUsdc.toLowerCase();
+    if (usdcAddress !== usdc.toLowerCase()) {
+      errors.push(`treasury.usdc()=${usdcAddress} ≠ 설정 MOARC_USDC_ADDRESS=${usdc}`);
+    }
+  } catch (e) {
+    errors.push(`treasury.usdc() 읽기 실패: ${sanitizeError(e)}`);
+  }
+
+  // 5. USDC decimals()
+  try {
+    const decimalsAbi = parseAbi(["function decimals() view returns (uint8)"]);
+    const d = await client.readContract({
+      address: usdc,
+      abi: decimalsAbi,
+      functionName: "decimals",
+    }) as number;
+    usdcDecimals = d;
+    if (d !== 6) {
+      errors.push(`USDC decimals=${d} ≠ 6`);
+    }
+  } catch (e) {
+    errors.push(`USDC decimals() 읽기 실패: ${sanitizeError(e)}`);
+  }
+
+  const result: ServerNetworkVerification = {
+    ok: errors.length === 0,
+    chainId,
+    bytecodePresent,
+    version,
+    usdcAddress,
+    usdcDecimals,
+    network: NETWORK,
+    contractAddress: contract,
+    errors,
+  };
+  _verificationResult = result;
+  return result;
 }
 
 // ─── createTrip ABI ──────────────────────────────────────────────────────────

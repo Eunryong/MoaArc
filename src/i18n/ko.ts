@@ -310,6 +310,17 @@ const ko: Record<I18nKeys, string> = {
   wallet_address_placeholder: "0x 지갑 주소",
   add_participant_btn: "참여자 추가",
 
+  // ── 네트워크 불일치 배너 ──────────────────────────────────────────────
+  network_mismatch_banner: "서버 네트워크 불일치 — 지갑 서명이 비활성화됩니다.",
+  network_status_unavailable: "서버 네트워크 상태를 가져올 수 없습니다 — 지갑 서명이 비활성화됩니다.",
+  network_pending: "서버 네트워크 검증 진행 중…",
+  network_chain_mismatch: "서버 chainId {{server}} ≠ 클라이언트 {{client}}",
+  network_contract_mismatch: "서버 컨트랙트 {{server}} ≠ 클라이언트 {{client}}",
+
+  // ── 정산: 온체인 미연결 ──────────────────────────────────────────────
+  settlement_onchain_not_connected: "온체인 정산이 아직 연결되지 않았습니다.",
+  settlement_onchain_not_connected_desc: "정산 제안·승인·부족분 납입·환급 수령은 온체인 정산이 배포된 후 활성화됩니다.",
+
   footer_disclaimer: "MoaArc는 Arc Testnet에서 실행됩니다. 모든 거래는 테스트 USDC를 사용하며 실제 금전적 가치가 없습니다.",
   // 참여자 추가 오류
   err_invalid_address: "유효한 0x 주소(42자)를 입력하세요.",

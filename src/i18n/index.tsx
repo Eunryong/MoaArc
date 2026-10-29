@@ -24,7 +24,10 @@ const Ctx = createContext<I18nCtx | null>(null);
 
 function interpolate(s: string, params?: Record<string, string | number>) {
   if (!params) return s;
-  return s.replace(/\{\{(\w+)\}\}/g, (_, k) => String(params[k] ?? `{{${k}}}`));
+  return s.replace(/\{\{(\w+)\}\}/g, (_, k: string) => {
+    const v: string | number | undefined = params[k];
+    return v !== undefined ? String(v) : `{{${k}}}`;
+  });
 }
 
 export function I18nProvider({ children }: { children: React.ReactNode }) {

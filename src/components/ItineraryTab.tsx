@@ -664,8 +664,8 @@ export default function ItineraryTab({
                 key={item.id}
                 item={item}
                 isAdmin={isAdmin}
-                onConfirm={handleConfirmItem}
-                onCancel={handleCancelItem}
+                onConfirm={(id) => { void handleConfirmItem(id); }}
+                onCancel={(id) => { void handleCancelItem(id); }}
               />
             ))
           )}

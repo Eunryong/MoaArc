@@ -30,6 +30,9 @@ interface Props {
   isWrongChain?: boolean;
 }
 
+// Onchain settlement is not yet connected — all action buttons are disabled until deployment.
+const ONCHAIN_SETTLEMENT_ENABLED = false;
+
 export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWrongChain: _isWrongChain }: Props) {
   const { t } = useI18n();
   const isAdmin = trip.participants.find((p) => p.id === currentUserId)?.isAdmin ?? false;
@@ -152,6 +155,15 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
 
   return (
     <div className="space-y-4">
+      {/* 온체인 정산 미연결 안내 */}
+      <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 flex items-start gap-3">
+        <span className="text-stone-400 mt-0.5 text-base">🔒</span>
+        <div>
+          <p className="text-sm font-semibold text-stone-700">{t("settlement_onchain_not_connected")}</p>
+          <p className="text-xs text-stone-500 mt-0.5">{t("settlement_onchain_not_connected_desc")}</p>
+        </div>
+      </div>
+
       {/* 미처리 항목 체크리스트 */}
       {pendingCount > 0 && (
         <div className="bg-rose-50 rounded-xl border border-rose-200 p-4">
@@ -250,7 +262,8 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
           <p className="text-xs text-stone-400 mb-3">{t("propose_settlement_desc")}</p>
           <button
             onClick={proposeSettlement}
-            className="w-full py-2.5 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors"
+            disabled={!ONCHAIN_SETTLEMENT_ENABLED}
+            className="w-full py-2.5 bg-stone-200 text-stone-400 rounded-lg text-sm font-medium cursor-not-allowed"
           >
             {t("propose_settlement_btn")}
           </button>
@@ -323,7 +336,8 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
                   min="0"
                   step="0.01"
                   max={toDisplayNumber(myDeficitRemaining)}
-                  className="flex-1 border border-rose-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-rose-300 bg-white"
+                  disabled={!ONCHAIN_SETTLEMENT_ENABLED}
+                  className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm bg-stone-100 text-stone-400 cursor-not-allowed"
                   placeholder={`max ${fmtUsdc(myDeficitRemaining)} USDC`}
                   value={deficitInput[currentUserId]}
                   onChange={(e) =>
@@ -332,7 +346,8 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
                 />
                 <button
                   onClick={() => payDeficit(currentUserId)}
-                  className="px-4 py-2 bg-rose-600 text-white rounded-lg text-sm font-medium hover:bg-rose-700 transition-colors"
+                  disabled={!ONCHAIN_SETTLEMENT_ENABLED}
+                  className="px-4 py-2 bg-stone-200 text-stone-400 rounded-lg text-sm font-medium cursor-not-allowed"
                 >
                   {t("pay_deficit_btn")}
                 </button>
@@ -347,7 +362,8 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
           {!myApproval?.approved && myDeficitRemaining <= 0 && (
             <button
               onClick={approveSettlement}
-              className="w-full py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition-colors mb-3"
+              disabled={!ONCHAIN_SETTLEMENT_ENABLED}
+              className="w-full py-2.5 bg-stone-200 text-stone-400 rounded-lg text-sm font-medium cursor-not-allowed mb-3"
             >
               {t("approve_settlement_btn")}
             </button>
@@ -376,7 +392,8 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
                   ) : (
                     <button
                       onClick={() => claimRefund(currentUserId)}
-                      className="w-full py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition-colors"
+                      disabled={!ONCHAIN_SETTLEMENT_ENABLED}
+                      className="w-full py-2.5 bg-stone-200 text-stone-400 rounded-lg text-sm font-medium cursor-not-allowed"
                     >
                       {t("claim_refund_btn")} {fmtUsdc(refundAmt)} USDC
                     </button>
