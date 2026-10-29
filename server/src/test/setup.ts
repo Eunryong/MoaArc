@@ -5,35 +5,118 @@
  * 테스트 종료 후 연결을 먼저 끊은 뒤 파일을 삭제합니다.
  * 공유 DB(dev.db)는 건드리지 않습니다.
  * 네트워크·실제 지갑·공유 DB를 사용하지 않습니다.
+ *
+ * 경로 결정 전략 (Studio, macOS, Linux 공통):
+ *  - 소스 파일 위치는 import.meta.url + fileURLToPath로 구합니다
+ *    (bun test가 .ts를 직접 실행하므로 __filename이 실제 소스 경로임)
+ *  - schema.prisma: 이 파일 기준 ../../prisma/schema.prisma
+ *    (server/src/test → server/src → server → server/prisma)
+ *  - 프로젝트 루트(node_modules 있는 디렉터리): ../../..
+ *    (server/src/test → server/src → server → [프로젝트 루트])
+ *  - Prisma CLI: 루트/node_modules/prisma/build/index.js 우선,
+ *    없으면 루트/node_modules/.bin/prisma
+ *  - Node 실행 파일: `which node` 우선(동기 실행), 없으면
+ *    플랫폼 공통 후보 경로 탐색, 마지막으로 process.execPath(node일 때만)
  */
 
-import { execFileSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import { unlinkSync, existsSync, copyFileSync, mkdtempSync, rmSync } from "fs";
 import { randomUUID } from "crypto";
 import path from "path";
+import { fileURLToPath } from "url";
 import { PrismaClient } from "@prisma/client";
 
-// Prisma CLI 후보 경로 — 존재 여부만 검사, 실행하지 않음
-const PRISMA_CLI_CANDIDATES = [
-  "/home/user/app/node_modules/prisma/build/index.js",
-];
-const NODE_CANDIDATES = [
-  "/usr/bin/node",
-  "/usr/local/bin/node",
-];
+// ─── 소스 파일 위치 ───────────────────────────────────────────────────────────
+// bun test는 TypeScript를 직접 실행하므로 import.meta.url이 .ts 소스 경로를 가리킴
+const __filename = fileURLToPath(import.meta.url);
+const __dir = path.dirname(__filename);
 
-function resolveCli(candidates: string[]): string {
+// ─── 프로젝트 루트 ────────────────────────────────────────────────────────────
+// 이 파일: server/src/test/setup.ts
+// 루트:    ../../..  →  server/src/test → server/src → server → [root]
+const PROJECT_ROOT = path.resolve(__dir, "../../..");
+
+// ─── schema.prisma 경로 ───────────────────────────────────────────────────────
+// server/prisma/schema.prisma → 이 파일에서 2단계 위 → server → server/prisma
+const SCHEMA_SRC = path.resolve(__dir, "../../prisma/schema.prisma");
+
+if (!existsSync(SCHEMA_SRC)) {
+  throw new Error(
+    `[setup.ts] schema.prisma not found at: ${SCHEMA_SRC}\n` +
+    `Expected location relative to ${__filename}: ../../prisma/schema.prisma`
+  );
+}
+
+// ─── Prisma CLI 경로 ──────────────────────────────────────────────────────────
+// node_modules は PROJECT_ROOT 아래에 있음
+function resolvePrismaCli(): string {
+  const candidates = [
+    path.resolve(PROJECT_ROOT, "node_modules/prisma/build/index.js"),
+    path.resolve(PROJECT_ROOT, "node_modules/.bin/prisma"),
+  ];
   for (const c of candidates) {
     if (existsSync(c)) return c;
   }
-  throw new Error(`None of these paths exist: ${candidates.join(", ")}`);
+  throw new Error(
+    `[setup.ts] Prisma CLI not found. Tried:\n${candidates.map(c => `  ${c}`).join("\n")}\n` +
+    `Make sure you ran 'bun install' (or 'npm install') in the project root: ${PROJECT_ROOT}`
+  );
 }
 
-const PRISMA_CLI = resolveCli(PRISMA_CLI_CANDIDATES);
-const NODE_BIN  = resolveCli(NODE_CANDIDATES);
+const PRISMA_CLI = resolvePrismaCli();
 
-// schema.prisma 원본 경로 (읽기 전용)
-const SCHEMA_SRC = path.resolve("/home/user/app/server/prisma/schema.prisma");
+// ─── Node 실행 파일 ───────────────────────────────────────────────────────────
+// Prisma CLI는 node로 실행해야 합니다 (bun과 호환 문제 방지).
+// 1순위: PATH에서 node를 찾음 (which node / where node)
+// 2순위: 플랫폼 공통 후보 경로
+// 3순위: process.execPath가 node 계열이면 사용
+function resolveNodeBin(): string {
+  // 1순위: PATH 탐색
+  try {
+    const cmd = process.platform === "win32" ? "where node" : "which node";
+    const found = execSync(cmd, { stdio: ["pipe", "pipe", "pipe"] })
+      .toString()
+      .split("\n")[0]
+      .trim();
+    if (found && existsSync(found)) return found;
+  } catch {
+    // which/where 실패 — 후보 경로로 계속
+  }
+
+  // 2순위: 플랫폼별 공통 후보 경로
+  const candidates =
+    process.platform === "win32"
+      ? [
+          "C:\\Program Files\\nodejs\\node.exe",
+          "C:\\Program Files (x86)\\nodejs\\node.exe",
+        ]
+      : [
+          "/usr/local/bin/node",
+          "/usr/bin/node",
+          "/opt/homebrew/bin/node",       // macOS ARM Homebrew
+          "/opt/homebrew/opt/node/bin/node",
+          "/usr/local/opt/node/bin/node",  // macOS Intel Homebrew
+          "/nix/var/nix/profiles/default/bin/node", // Nix
+        ];
+
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+
+  // 3순위: process.execPath가 node 계열이면 허용
+  const ep = process.execPath;
+  if (path.basename(ep).startsWith("node") && existsSync(ep)) return ep;
+
+  throw new Error(
+    `[setup.ts] Node.js executable not found.\n` +
+    `'which node' returned nothing, and none of the fallback paths exist.\n` +
+    `Make sure Node.js is installed and available in PATH.`
+  );
+}
+
+const NODE_BIN = resolveNodeBin();
+
+// ─── createTestDb ─────────────────────────────────────────────────────────────
 
 /** 격리된 테스트 DB를 생성하고 Prisma 클라이언트와 DB URL을 반환합니다 */
 export function createTestDb(label: string): {
