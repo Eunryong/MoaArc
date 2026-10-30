@@ -3,7 +3,7 @@
  *
  * 공통 실행 경로:
  *  1. 레거시 방 차단 (contractAddress가 현재 배포와 다르면 거부)
- *  2. simulateContract — revert 사전 감지 (선택적)
+ *  2. simulateAs — 연결된 지갑을 sender(account)로 지정해 revert 사전 감지 (account 없으면 msg.sender 가 0x0 이 되어 항상 실패)
  *  3. writeContractAsync — 지갑 서명
  *  4. waitForTransactionReceipt — receipt.status 검증 (reverted이면 오류)
  *  5. approve tx와 money-moving tx는 상태·해시 구분
@@ -19,7 +19,9 @@ import {
 } from "wagmi";
 import { MOAARK_ABI, ERC20_ABI } from "./contractAbi";
 import { NETWORK_CONFIG, CONFIG_VALID, txExplorerUrl as explorerUrl } from "./networkConfig";
+import { backendNetworkMismatch } from "./networkConfigCore";
 import { getNetworkStatus } from "./apiClient";
+import { simulateAs, extractRevertReason } from "./txHelpers";
 
 // Always read live addresses from NETWORK_CONFIG — contractAbi.ts re-exports
 // these same values, but importing directly here avoids any circular risk.
@@ -39,13 +41,6 @@ export interface TxState {
 }
 
 // ─── 공통 유틸 ────────────────────────────────────────────────────────────────
-
-function extractRevertReason(e: unknown): string {
-  const msg = e instanceof Error ? e.message : String(e);
-  // viem ContractFunctionRevertedError carries shortMessage
-  const short = (e as { shortMessage?: string }).shortMessage;
-  return short ?? msg.slice(0, 200);
-}
 
 /** receipt.status === "reverted"이면 throw */
 async function waitAndVerify(
@@ -79,19 +74,9 @@ export function isLegacyTrip(
   return false;
 }
 
-/**
- * simulateContract로 revert를 사전 감지합니다.
- * 성공 시 void 반환, 실패 시 ContractFunctionRevertedError를 throw합니다.
- */
-async function simulate(
-  publicClient: NonNullable<ReturnType<typeof usePublicClient>>,
-  params: Parameters<typeof publicClient.simulateContract>[0]
-) {
-  await publicClient.simulateContract(params);
-}
-
 const LEGACY_BLOCKED_MSG =
   "이 여행방은 이전 컨트랙트를 사용합니다. 새 여행방을 만들어 v3 기능을 사용하세요.";
+const WALLET_NOT_CONNECTED_MSG = "지갑이 연결되지 않았습니다.";
 const CONFIG_INVALID_MSG =
   "컨트랙트 설정이 완료되지 않았습니다. 환경변수를 확인하세요.";
 const BACKEND_MISMATCH_MSG =
@@ -107,24 +92,8 @@ const BACKEND_MISMATCH_MSG =
  */
 async function assertBackendNetworkMatches(): Promise<void> {
   const ns = await getNetworkStatus();
-  if (!ns) throw new Error(BACKEND_MISMATCH_MSG);
-  if (ns.status !== "ok") throw new Error(BACKEND_MISMATCH_MSG);
-  // 필수 필드 누락
-  if (ns.chainId === undefined || !ns.contractAddress || !ns.usdcAddress || !ns.version) {
-    throw new Error(BACKEND_MISMATCH_MSG);
-  }
-  // chainId 일치
-  if (ns.chainId !== NETWORK_CONFIG.chainId) throw new Error(BACKEND_MISMATCH_MSG);
-  // contractAddress 일치
-  if (ns.contractAddress.toLowerCase() !== NETWORK_CONFIG.contractAddress.toLowerCase()) {
-    throw new Error(BACKEND_MISMATCH_MSG);
-  }
-  // usdcAddress 일치
-  if (ns.usdcAddress.toLowerCase() !== NETWORK_CONFIG.usdcAddress.toLowerCase()) {
-    throw new Error(BACKEND_MISMATCH_MSG);
-  }
-  // version 일치
-  if (ns.version !== NETWORK_CONFIG.contractVersion) throw new Error(BACKEND_MISMATCH_MSG);
+  // network 이름("mainnet"/"testnet"), chainId, 컨트랙트, USDC, VERSION 이 모두 일치해야 함
+  if (backendNetworkMismatch(ns, NETWORK_CONFIG) !== null) throw new Error(BACKEND_MISMATCH_MSG);
 }
 
 // ─── useDeposit ───────────────────────────────────────────────────────────────
@@ -158,11 +127,10 @@ export function useDeposit(tripId: bigint, tripContractAddress?: string) {
         // Step 2: re-check server state after approve completes, then simulate + sign deposit
         setState({ status: "waiting_approval", approveTxHash: approveTx });
         await assertBackendNetworkMatches();
-        await simulate(publicClient, {
+        await simulateAs(publicClient, {
           address: MOAARK_ADDRESS, abi: MOAARK_ABI,
           functionName: "deposit", args: [tripId, amount],
-          account: address,
-        });
+        }, address);
         const depositTx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
@@ -189,20 +157,22 @@ export function useReleaseBudget(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
+  const { address } = useAccount();
 
   const execute = useCallback(
     async (spender: `0x${string}`, amount: bigint, memo: string) => {
-      if (!publicClient) { setState({ status: "error", errorMessage: "RPC 연결 없음" }); return; }
+      if (!address || !publicClient) { setState({ status: "error", errorMessage: WALLET_NOT_CONNECTED_MSG }); return; }
       if (!CONFIG_VALID) { setState({ status: "error", errorMessage: CONFIG_INVALID_MSG }); return; }
       if (isLegacyTrip(tripContractAddress)) { setState({ status: "error", errorMessage: LEGACY_BLOCKED_MSG }); return; }
 
       setState({ status: "waiting_approval" });
       try {
         await assertBackendNetworkMatches();
-        await simulate(publicClient, {
+        // onlyAdmin 은 msg.sender 를 검사하므로 연결된 지갑을 account 로 지정해야 함
+        await simulateAs(publicClient, {
           address: MOAARK_ADDRESS, abi: MOAARK_ABI,
           functionName: "releaseBudget", args: [tripId, spender, amount, memo],
-        });
+        }, address);
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
@@ -217,7 +187,7 @@ export function useReleaseBudget(tripId: bigint, tripContractAddress?: string) {
         setState((s) => ({ ...s, status: "error", errorMessage: extractRevertReason(e) }));
       }
     },
-    [publicClient, writeContractAsync, tripId, tripContractAddress]
+    [address, publicClient, writeContractAsync, tripId, tripContractAddress]
   );
 
   return { state, execute, reset: () => setState({ status: "idle" }) };
@@ -329,20 +299,21 @@ export function useApproveFinalSettlement(tripId: bigint, tripContractAddress?: 
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
+  const { address } = useAccount();
 
   const execute = useCallback(
     async (ledgerHash: `0x${string}`) => {
-      if (!publicClient) { setState({ status: "error", errorMessage: "RPC 연결 없음" }); return; }
+      if (!address || !publicClient) { setState({ status: "error", errorMessage: WALLET_NOT_CONNECTED_MSG }); return; }
       if (!CONFIG_VALID) { setState({ status: "error", errorMessage: CONFIG_INVALID_MSG }); return; }
       if (isLegacyTrip(tripContractAddress)) { setState({ status: "error", errorMessage: LEGACY_BLOCKED_MSG }); return; }
 
       setState({ status: "waiting_approval" });
       try {
         await assertBackendNetworkMatches();
-        await simulate(publicClient, {
+        await simulateAs(publicClient, {
           address: MOAARK_ADDRESS, abi: MOAARK_ABI,
           functionName: "approveFinalSettlement", args: [tripId, ledgerHash],
-        });
+        }, address);
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
@@ -357,7 +328,7 @@ export function useApproveFinalSettlement(tripId: bigint, tripContractAddress?: 
         setState((s) => ({ ...s, status: "error", errorMessage: extractRevertReason(e) }));
       }
     },
-    [publicClient, writeContractAsync, tripId, tripContractAddress]
+    [address, publicClient, writeContractAsync, tripId, tripContractAddress]
   );
 
   return { state, execute, reset: () => setState({ status: "idle" }) };
@@ -369,19 +340,20 @@ export function useClaimRefund(tripId: bigint, tripContractAddress?: string) {
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
+  const { address } = useAccount();
 
   const execute = useCallback(async () => {
-    if (!publicClient) { setState({ status: "error", errorMessage: "RPC 연결 없음" }); return; }
+    if (!address || !publicClient) { setState({ status: "error", errorMessage: WALLET_NOT_CONNECTED_MSG }); return; }
     if (!CONFIG_VALID) { setState({ status: "error", errorMessage: CONFIG_INVALID_MSG }); return; }
     if (isLegacyTrip(tripContractAddress)) { setState({ status: "error", errorMessage: LEGACY_BLOCKED_MSG }); return; }
 
     setState({ status: "waiting_approval" });
     try {
       await assertBackendNetworkMatches();
-      await simulate(publicClient, {
+      await simulateAs(publicClient, {
         address: MOAARK_ADDRESS, abi: MOAARK_ABI,
         functionName: "claimRefund", args: [tripId],
-      });
+      }, address);
       const tx = await writeContractAsync({
         address: MOAARK_ADDRESS,
         abi: MOAARK_ABI,
@@ -395,7 +367,7 @@ export function useClaimRefund(tripId: bigint, tripContractAddress?: string) {
     } catch (e) {
       setState((s) => ({ ...s, status: "error", errorMessage: extractRevertReason(e) }));
     }
-  }, [publicClient, writeContractAsync, tripId, tripContractAddress]);
+  }, [address, publicClient, writeContractAsync, tripId, tripContractAddress]);
 
   return { state, execute, reset: () => setState({ status: "idle" }) };
 }
@@ -484,19 +456,20 @@ export function useCancelSettlement(tripId: bigint, tripContractAddress?: string
   const [state, setState] = useState<TxState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
+  const { address } = useAccount();
 
   const execute = useCallback(async () => {
-    if (!publicClient) { setState({ status: "error", errorMessage: "RPC 연결 없음" }); return; }
+    if (!address || !publicClient) { setState({ status: "error", errorMessage: WALLET_NOT_CONNECTED_MSG }); return; }
     if (!CONFIG_VALID) { setState({ status: "error", errorMessage: CONFIG_INVALID_MSG }); return; }
     if (isLegacyTrip(tripContractAddress)) { setState({ status: "error", errorMessage: LEGACY_BLOCKED_MSG }); return; }
 
     setState({ status: "waiting_approval" });
     try {
       await assertBackendNetworkMatches();
-      await simulate(publicClient, {
+      await simulateAs(publicClient, {
         address: MOAARK_ADDRESS, abi: MOAARK_ABI,
         functionName: "cancelSettlement", args: [tripId],
-      });
+      }, address);
       const tx = await writeContractAsync({
         address: MOAARK_ADDRESS,
         abi: MOAARK_ABI,
@@ -510,7 +483,7 @@ export function useCancelSettlement(tripId: bigint, tripContractAddress?: string
     } catch (e) {
       setState((s) => ({ ...s, status: "error", errorMessage: extractRevertReason(e) }));
     }
-  }, [publicClient, writeContractAsync, tripId, tripContractAddress]);
+  }, [address, publicClient, writeContractAsync, tripId, tripContractAddress]);
 
   return { state, execute, reset: () => setState({ status: "idle" }) };
 }
@@ -529,6 +502,7 @@ export function useAddParticipant(tripId: bigint, tripContractAddress?: string) 
   const [state, setState] = useState<AddParticipantState>({ status: "idle" });
   const { writeContractAsync } = useWriteContract();
   const publicClient = usePublicClient({ chainId: CHAIN_ID });
+  const { address } = useAccount();
 
   const execute = useCallback(
     async (newParticipant: `0x${string}`): Promise<`0x${string}` | null> => {
@@ -536,17 +510,17 @@ export function useAddParticipant(tripId: bigint, tripContractAddress?: string) 
       if (state.confirmedTxHash && state.confirmedAddress === newParticipant.toLowerCase()) {
         return state.confirmedTxHash;
       }
-      if (!publicClient) { setState({ status: "error", errorMessage: "RPC 연결 없음" }); return null; }
+      if (!address || !publicClient) { setState({ status: "error", errorMessage: WALLET_NOT_CONNECTED_MSG }); return null; }
       if (!CONFIG_VALID) { setState({ status: "error", errorMessage: CONFIG_INVALID_MSG }); return null; }
       if (isLegacyTrip(tripContractAddress)) { setState({ status: "error", errorMessage: LEGACY_BLOCKED_MSG }); return null; }
 
       setState({ status: "waiting_approval" });
       try {
         await assertBackendNetworkMatches();
-        await simulate(publicClient, {
+        await simulateAs(publicClient, {
           address: MOAARK_ADDRESS, abi: MOAARK_ABI,
           functionName: "addParticipant", args: [tripId, newParticipant],
-        });
+        }, address);
         const tx = await writeContractAsync({
           address: MOAARK_ADDRESS,
           abi: MOAARK_ABI,
@@ -568,7 +542,7 @@ export function useAddParticipant(tripId: bigint, tripContractAddress?: string) 
         return null;
       }
     },
-    [tripId, tripContractAddress, writeContractAsync, publicClient, state.confirmedTxHash, state.confirmedAddress]
+    [address, tripId, tripContractAddress, writeContractAsync, publicClient, state.confirmedTxHash, state.confirmedAddress]
   );
 
   const reset = useCallback(() => setState({ status: "idle" }), []);

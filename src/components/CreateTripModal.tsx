@@ -15,7 +15,10 @@
 
 import { useState, useCallback } from "react";
 import { useI18n } from "../i18n";
+import { parseOptionalUsdc, usdcInputProblem } from "../calculations";
 import { useSendTransaction, useChainId } from "wagmi";
+import { NETWORK_CONFIG, NETWORK_LABEL, CONFIG_VALID } from "../networkConfig";
+import { assertIntentTxMatchesConfig } from "../intentGuard";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   prepareCreateTripIntent,
@@ -24,8 +27,6 @@ import {
   getToken,
   type TripApiRecord,
 } from "../apiClient";
-
-const ARC_TESTNET_CHAIN_ID = 5042002;
 
 interface Participant {
   name: string;
@@ -56,7 +57,7 @@ function parseError(e: unknown): string {
 export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props) {
   const { t } = useI18n();
   const chainId = useChainId();
-  const isWrongChain = chainId !== ARC_TESTNET_CHAIN_ID;
+  const isWrongChain = chainId !== NETWORK_CONFIG.chainId;
 
   const [step, setStep] = useState<Step>("form");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -68,6 +69,8 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
   const [participants, setParticipants] = useState<Participant[]>([
     { name: t("me"), address: connectedAddress },
   ]);
+
+  const budgetProblem = usdcInputProblem(budgetInput);
 
   const { sendTransactionAsync } = useSendTransaction();
   const queryClient = useQueryClient();
@@ -110,11 +113,13 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
   // ─── 생성 실행 ──────────────────────────────────────────────────────────────
   const handleCreate = useCallback(async () => {
     if (!tripName.trim()) { setErrorMsg(t("err_400")); return; }
-    if (isWrongChain) { setErrorMsg(t("switch_to_arc")); return; }
+    if (isWrongChain) { setErrorMsg(t("switch_to_arc", { network: NETWORK_LABEL })); return; }
+    if (!CONFIG_VALID) { setErrorMsg(t("config_invalid_blocked")); return; }
 
-    const budgetUSDC = Number(budgetInput || "0");
-    if (budgetInput && budgetUSDC < 0) { setErrorMsg(t("err_400")); return; }
-    const targetBudgetMicro = BigInt(Math.round(budgetUSDC * 1_000_000));
+    // 목표 예산은 선택 입력(빈 값 = 0). 7자리 이상 소수·지수 표기·음수는 서버/지갑 호출 전에 거부 (반올림 없음)
+    const budgetParsed = parseOptionalUsdc(budgetInput);
+    if (!budgetParsed.ok) { setErrorMsg(t(budgetParsed.key)); return; }
+    const targetBudgetMicro = budgetParsed.value;
 
     const otherParticipants = participants
       .filter((p) => p.address.trim() && p.address.toLowerCase() !== connectedAddress.toLowerCase())
@@ -141,14 +146,26 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
       setIntentId(intentResp.intentId);
       setStep("awaiting_wallet");
 
-      // 2. 지갑 서명 — calldata를 그대로 전달, 영수증 조회는 하지 않음
+      // 2. 지갑 서명 직전 검증 — 서버가 준 tx 가 이 프런트 설정(체인·컨트랙트)과 사용자 입력(이름·참여자·예산)과
+      //    정확히 같고 value=0 인지 확인합니다. 하나라도 다르면 지갑을 호출하지 않습니다.
+      assertIntentTxMatchesConfig(intentResp.tx, {
+        configValid: CONFIG_VALID,
+        chainId: NETWORK_CONFIG.chainId,
+        contractAddress: NETWORK_CONFIG.contractAddress,
+        tripName: tripName.trim(),
+        participantAddresses: otherParticipants,
+        targetBudgetMicro,
+      });
+
+      // 3. 지갑 서명 — calldata를 그대로 전달 (chainId 고정), 영수증 조회는 하지 않음
       const txHash = await sendTransactionAsync({
         to: intentResp.tx.to,
         data: intentResp.tx.data,
-        value: BigInt(intentResp.tx.value),
+        value: 0n,
+        chainId: NETWORK_CONFIG.chainId,
       });
 
-      // 3. txHash를 백엔드에 제출
+      // 4. txHash를 백엔드에 제출
       const submitResult = await submitTripIntentTxHash(intentResp.intentId, txHash);
 
       if (submitResult.status === "confirmed" && submitResult.trip) {
@@ -157,7 +174,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
         return;
       }
 
-      // 4. 아직 미확인 → polling 시작
+      // 5. 아직 미확인 → polling 시작
       setStep("polling");
     } catch (e) {
       setStep("error");
@@ -204,7 +221,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
           {/* 체인 경고 */}
           {isWrongChain && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
-              {t("switch_to_arc")} (Chain ID: 5042002). Current: {chainId}
+              {t("switch_to_arc", { network: NETWORK_LABEL })} (Chain ID: {NETWORK_CONFIG.chainId}). Current: {chainId}
             </div>
           )}
 
@@ -235,13 +252,16 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
               {t("budget_label")}
             </label>
             <input
-              type="number"
-              min="0"
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
+              aria-invalid={!!budgetProblem}
               value={budgetInput}
               onChange={(e) => setBudgetInput(e.target.value)}
               placeholder="예: 500"
               className="w-full px-4 py-2.5 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
             />
+            {budgetProblem && <p className="mt-1 text-xs text-rose-600">{t(budgetProblem)}</p>}
           </div>
 
           {/* 참여자 */}
@@ -297,7 +317,7 @@ export function CreateTripModal({ onClose, onCreated, connectedAddress }: Props)
           </button>
           <button
             onClick={() => void handleCreate()}
-            disabled={isWrongChain || !tripName.trim()}
+            disabled={isWrongChain || !tripName.trim() || !!budgetProblem}
             className="flex-1 py-3 rounded-xl bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {t("create_trip_btn")}

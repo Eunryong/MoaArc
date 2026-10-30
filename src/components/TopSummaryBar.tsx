@@ -1,6 +1,7 @@
 import type { ParticipantSummary, Participant } from "../types";
 import { fmtUsdc } from "../calculations";
 import { useI18n } from "../i18n";
+import { statusLabelKey } from "../onchainReads";
 
 interface Props {
   participant: Participant;
@@ -9,7 +10,9 @@ interface Props {
 
 export default function TopSummaryBar({ participant, summary }: Props) {
   const { t } = useI18n();
-  const { depositedAmount, confirmedBurden, pendingBurden, netBalance } = summary;
+  const { depositedAmount, confirmedBurden, pendingBurden, netBalance, balancesStatus } = summary;
+  // 온체인 잔액을 아직 못 읽었거나 실패하면 deposit/net 은 값이 아니라 상태 문구로 표시 (가짜 0 방지)
+  const statusText = balancesStatus === "ok" ? null : t(statusLabelKey(balancesStatus));
 
   const netSign = netBalance >= 0n ? "+" : "-";
   const netAbs = netBalance < 0n ? -netBalance : netBalance;
@@ -34,7 +37,11 @@ export default function TopSummaryBar({ participant, summary }: Props) {
           <div className="bg-stone-50 rounded-lg p-3 border border-stone-200">
             <p className="text-xs text-stone-500 mb-0.5">{t("actual_deposit")}</p>
             <p className="text-lg font-bold text-stone-800 tabular-nums">
-              {fmtUsdc(depositedAmount)} <span className="text-xs font-normal text-stone-500">USDC</span>
+              {statusText ?? (
+                <>
+                  {fmtUsdc(depositedAmount)} <span className="text-xs font-normal text-stone-500">USDC</span>
+                </>
+              )}
             </p>
           </div>
 
@@ -54,14 +61,20 @@ export default function TopSummaryBar({ participant, summary }: Props) {
           {/* 차액 */}
           <div
             className={`rounded-lg p-3 border ${
-              netBalance >= 0
+              statusText
+                ? "bg-stone-50 border-stone-200"
+                : netBalance >= 0
                 ? "bg-emerald-50 border-emerald-200"
                 : "bg-rose-50 border-rose-200"
             }`}
           >
-            <p className="text-xs text-stone-500 mb-0.5">{netLabel}</p>
-            <p className={`text-lg font-bold tabular-nums ${netColor}`}>
-              {netSign}{fmtUsdc(netAbs)} <span className="text-xs font-normal text-stone-500">USDC</span>
+            <p className="text-xs text-stone-500 mb-0.5">{statusText ? `${t("surplus")} / ${t("deficit")}` : netLabel}</p>
+            <p className={`text-lg font-bold tabular-nums ${statusText ? "text-stone-500" : netColor}`}>
+              {statusText ?? (
+                <>
+                  {netSign}{fmtUsdc(netAbs)} <span className="text-xs font-normal text-stone-500">USDC</span>
+                </>
+              )}
             </p>
           </div>
         </div>

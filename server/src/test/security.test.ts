@@ -1,17 +1,17 @@
 /**
- * 보안 통합 테스트 — 영구 테스트 파일
+ * 보안 통합 테스트 — bun:sqlite
  *
- * 격리된 임시 SQLite DB에서 실제 Prisma 레이어 및 Hono 라우트를 통해
+ * 격리된 임시 SQLite DB에서 실제 bun:sqlite 레이어 및 Hono 라우트를 통해
  * 다음을 검증합니다:
  *
  *   DB 레이어:
- *   - SQL injection 입력이 DB를 오염시키지 않음
+ *   - SQL injection 입력이 파라미터 바인딩으로 DB를 오염시키지 않음
  *   - IDOR: 다른 사용자 여행방 하위 리소스는 tripId 격리
  *   - nonce unique/used/expired 상태 확인
  *   - nonce 동시 재사용: verifySignatureAndIssueToken 실제 호출로 한 번만 성공
  *   - unique constraint (중복 trip·participant·intent·txHash)
  *   - 입력 길이/enum/주소 allowlist 검증
- *   - cascade 삭제 원자성
+ *   - cascade 삭제 원자성 (외래키 ON DELETE CASCADE)
  *
  *   API 레이어 (Hono app.request() — 네트워크 없음):
  *   - 무인증 → 401
@@ -23,15 +23,15 @@
  *   - Alice가 Alice expenses 조회 → 200
  *   - non-admin이 itinerary POST → 403
  *
- * 모든 모듈(app, controller, auth)은 DB URL 설정 이후 동적 import.
- * setup.ts만 정적 import (lib/prisma 미사용).
  * .env 파일 접근 없음. 민감값 출력 없음.
- * 네트워크·실제 지갑·공유 DB를 사용하지 않습니다.
+ * 실제 dev.db·공유 DB를 사용하지 않습니다.
+ * DATABASE_URL 환경변수를 직접 변경하지 않고 _setTestDb()로 싱글턴을 교체합니다.
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { createTestDb, TEST_ADDRESSES, SQL_PAYLOADS } from "./setup.js";
-import type { PrismaClient } from "@prisma/client";
+import { createTestDb, _setTestDb, _clearTestDb, TEST_ADDRESSES, SQL_PAYLOADS } from "./setup.js";
+import { newId, toIso } from "../lib/db.js";
+import type { Database } from "bun:sqlite";
 
 // ─── 타입 선언 (동적 import 대상) ────────────────────────────────────────────
 
@@ -40,27 +40,10 @@ type AssertFn = (val: unknown, allowed: Set<string>, field: string) => string;
 type AssertStrFn = (val: unknown, field: string, max?: number) => string;
 type AssertAddrFn = (val: unknown, field: string) => string;
 
-/**
- * 실제 Prisma 클라이언트 타입에서 테스트에 필요한 delegate들을 추출합니다.
- * `Function` 타입을 사용하지 않으므로 oxlint no-unsafe-function-type를 통과합니다.
- * mock이 아닌 실제 PrismaClient 인스턴스를 동적 import 후 이 타입으로 참조합니다.
- */
-type PrismaLike = Pick<
-  PrismaClient,
-  | "tripRecord"
-  | "participantRecord"
-  | "expenseRecord"
-  | "itineraryRecord"
-  | "authNonce"
-  | "tripCreationIntent"
-  | "$connect"
-  | "$disconnect"
->;
-
 // ─── 모듈 핸들 (동적 import 후 채워짐) ──────────────────────────────────────
 
-let db: ReturnType<typeof createTestDb>;
-let prisma: PrismaLike;
+let testDb: ReturnType<typeof createTestDb>;
+let db: Database;
 let app: HonoApp;
 let assertEnum: AssertFn;
 let assertStr: AssertStrFn;
@@ -77,36 +60,27 @@ let verifySignatureAndIssueToken: (
   signature: `0x${string}`
 ) => Promise<string>;
 
-let appPrisma: { $disconnect: () => Promise<void> } | undefined;
-let aliceTrip: { id: string };
-let bobTrip: { id: string };
+let aliceTripId: string;
+let bobTripId: string;
 let aliceToken: string;
 let bobToken: string;
 
 const TEST_JWT_SECRET = "test-only-secret-" + Math.random().toString(36).slice(2, 10);
 
 beforeAll(async () => {
-  // 0. fail-fast: globalThis.prisma가 이미 설정돼 있으면 다른 프로세스의
-  //    dev.db 싱글턴이 남아 있다는 뜻 — 격리가 불가능하므로 즉시 실패.
-  //    이 테스트는 반드시 독립된 Bun 프로세스에서 실행해야 합니다.
-  if ((globalThis as Record<string, unknown>).prisma !== undefined) {
-    throw new Error(
-      "globalThis.prisma is already set — run this test in a fresh Bun process " +
-      "(e.g. DATABASE_URL=file:/tmp/test.db bun test server/src/test/security.test.ts)"
-    );
-  }
+  // 1. 격리 DB 생성 (openDb → initSchema 포함)
+  testDb = createTestDb("security");
+  db = testDb.db;
 
-  // 1. 격리 DB 생성 — 스키마 push 포함, /tmp 전용
-  db = createTestDb("security");
+  // 2. 싱글턴 교체 — 모든 동적 import 이전에 수행
+  _setTestDb(db);
 
-  // 2. 환경변수를 모든 동적 import 전에 설정
-  //    → lib/prisma.ts가 이 URL로 PrismaClient를 초기화
-  process.env.DATABASE_URL = db.dbUrl;
+  // 3. 환경변수 설정
   process.env.JWT_SECRET = TEST_JWT_SECRET;
   process.env.MOARC_CONTRACT_ADDRESS = "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3";
   process.env.NODE_ENV = "test";
 
-  // 3. 동적 import — 환경변수 설정 이후에 실행되어야 함
+  // 4. 동적 import — DB 싱글턴 주입 이후
   const ctrlMod = await import("../controllers/trips.controller.js");
   assertEnum = ctrlMod.assertEnum;
   assertStr = ctrlMod.assertStr;
@@ -121,13 +95,10 @@ beforeAll(async () => {
   issueNonce = authMod.issueNonce;
   verifySignatureAndIssueToken = authMod.verifySignatureAndIssueToken;
 
-  const appMod = await import("../index.js");
-  app = (appMod as { default: HonoApp }).default;
+  const appMod = await import("../app.js");
+  app = (appMod as { app: HonoApp }).app;
 
-  // 4. 네트워크 검증 결과를 "ready=OK"로 주입합니다.
-  //    이렇게 하면 실제 미들웨어(isNetworkReady)가 동작하면서도 RPC 호출 없이 통과합니다.
-  //    네트워크 미들웨어 자체(503/통과)는 별도 describe에서 _setVerificationResultForTest로
-  //    ready/mismatch/undefined를 주입하며 검증합니다.
+  // 5. 네트워크 검증 결과를 OK로 주입 (RPC 호출 없이 미들웨어 통과)
   const chainMod = await import("../lib/chain.js");
   chainMod._setVerificationResultForTest({
     ok: true,
@@ -141,103 +112,72 @@ beforeAll(async () => {
     errors: [],
   });
 
-  // 6. app이 사용하는 lib/prisma 싱글턴 — 변수로 보관 (afterAll disconnect용)
-  const prismaMod = await import("../lib/prisma.js");
-  prisma = prismaMod.prisma as unknown as PrismaLike;
-  appPrisma = prismaMod.prisma as unknown as { $disconnect: () => Promise<void> };
-  await prisma.$connect();
-
-  // 7. 테스트 JWT (jose — 값 미출력)
+  // 6. 테스트 JWT (jose — 값 미출력)
   const { SignJWT } = await import("jose");
   const secret = new TextEncoder().encode(TEST_JWT_SECRET);
   aliceToken = await new SignJWT({ sub: TEST_ADDRESSES.alice })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(secret);
+    .setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("1h").sign(secret);
   bobToken = await new SignJWT({ sub: TEST_ADDRESSES.bob })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setExpirationTime("1h")
-    .sign(secret);
+    .setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime("1h").sign(secret);
 
-  // 8. 픽스처 생성
-  aliceTrip = await (prisma.tripRecord.create)({
-    data: {
-      chainId: 5042002,
-      contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-      onchainTripId: BigInt(1),
-      name: "Alice trip",
-      adminAddress: TEST_ADDRESSES.alice,
-      createTxHash: "0x" + "a".repeat(64),
-      participants: {
-        create: { address: TEST_ADDRESSES.alice, displayName: "Alice", isAdmin: true },
-      },
-    },
-  });
+  // 7. 픽스처 직접 INSERT (bun:sqlite)
+  const { newId, toIso } = await import("../lib/db.js");
+  const now = toIso(new Date());
 
-  bobTrip = await (prisma.tripRecord.create)({
-    data: {
-      chainId: 5042002,
-      contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-      onchainTripId: BigInt(2),
-      name: "Bob trip",
-      adminAddress: TEST_ADDRESSES.bob,
-      createTxHash: "0x" + "b".repeat(64),
-      participants: {
-        create: { address: TEST_ADDRESSES.bob, displayName: "Bob", isAdmin: false },
-      },
-    },
-  });
+  aliceTripId = newId();
+  db.prepare(
+    `INSERT INTO TripRecord (id, chainId, contractAddress, onchainTripId, name, adminAddress, createTxHash, createdAt, updatedAt)
+     VALUES (?, 5042002, '0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3', 1, 'Alice trip', ?, ?, ?, ?)`
+  ).run(aliceTripId, TEST_ADDRESSES.alice, "0x" + "a".repeat(64), now, now);
+  db.prepare(
+    `INSERT INTO ParticipantRecord (id, tripId, address, displayName, isAdmin) VALUES (?, ?, ?, 'Alice', 1)`
+  ).run(newId(), aliceTripId, TEST_ADDRESSES.alice);
+
+  bobTripId = newId();
+  db.prepare(
+    `INSERT INTO TripRecord (id, chainId, contractAddress, onchainTripId, name, adminAddress, createTxHash, createdAt, updatedAt)
+     VALUES (?, 5042002, '0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3', 2, 'Bob trip', ?, ?, ?, ?)`
+  ).run(bobTripId, TEST_ADDRESSES.bob, "0x" + "b".repeat(64), now, now);
+  db.prepare(
+    `INSERT INTO ParticipantRecord (id, tripId, address, displayName, isAdmin) VALUES (?, ?, ?, 'Bob', 0)`
+  ).run(newId(), bobTripId, TEST_ADDRESSES.bob);
 
   // Alice trip 경비 픽스처 (IDOR 테스트용)
-  await (prisma.expenseRecord.create)({
-    data: {
-      tripId: aliceTrip.id,
-      payerAddress: TEST_ADDRESSES.alice,
-      title: "Alice 식비",
-      category: "식비",
-      date: "2025-01-01",
-      totalUsdc: BigInt(1_000_000),
-      paymentFlow: "community_release",
-      status: "승인대기",
-      createdBy: TEST_ADDRESSES.alice,
-    },
-  });
+  db.prepare(
+    `INSERT INTO ExpenseRecord
+       (id, tripId, payerAddress, title, category, date, totalUsdc, paymentFlow, status, createdBy, createdAt, updatedAt)
+     VALUES (?, ?, ?, 'Alice 식비', '식비', '2025-01-01', 1000000, 'community_release', '승인대기', ?, ?, ?)`
+  ).run(newId(), aliceTripId, TEST_ADDRESSES.alice, TEST_ADDRESSES.alice, now, now);
 });
 
 afterAll(async () => {
-  // beforeAll에서 보관한 appPrisma만 disconnect — 동적 re-import 없음
-  if (appPrisma) {
-    try { await appPrisma.$disconnect(); } catch { /* 이미 종료됐으면 무시 */ }
-  }
-  // db가 생성된 경우에만 helper cleanup (helper Prisma disconnect + /tmp 파일 삭제)
-  if (db) {
-    await db.cleanup();
-  }
+  _clearTestDb();
+  if (testDb) await testDb.cleanup();
 });
 
 // ─── 1. SQL injection ─────────────────────────────────────────────────────────
 
-describe("SQL injection — Prisma ORM 바인딩", () => {
+describe("SQL injection — bun:sqlite 파라미터 바인딩", () => {
   test.each(SQL_PAYLOADS.filter((p) => p.length <= 200))(
     "주입 문자열이 itinerary location으로 저장되면 문자 그대로 보존됨: %s",
-    async (payload) => {
-      const record = await (prisma.itineraryRecord.create)({
-        data: {
-          tripId: aliceTrip.id,
-          date: "2025-01-01",
-          location: payload,
-          activity: "보안 테스트",
-          participants: "[]",
-          status: "draft",
-          createdBy: TEST_ADDRESSES.alice,
-        },
-      });
-      expect(record.location).toBe(payload);
-      const trip = await (prisma.tripRecord.findUnique)({ where: { id: aliceTrip.id } });
+    (payload) => {
+      
+      const id = newId();
+      const now = toIso(new Date());
+      db.prepare(
+        `INSERT INTO ItineraryRecord
+           (id, tripId, date, location, activity, participants, status, createdBy, createdAt, updatedAt)
+         VALUES (?, ?, '2025-01-01', ?, 'test', '[]', 'draft', ?, ?, ?)`
+      ).run(id, aliceTripId, payload, TEST_ADDRESSES.alice, now, now);
+
+      const row = db.prepare(`SELECT location FROM ItineraryRecord WHERE id = ?`).get(id) as { location: string } | null;
+      expect(row?.location).toBe(payload);
+
+      // TripRecord가 그대로 존재하는지 확인 (DROP TABLE 방지 검증)
+      const trip = db.prepare(`SELECT id FROM TripRecord WHERE id = ?`).get(aliceTripId);
       expect(trip).not.toBeNull();
-      await (prisma.itineraryRecord.delete)({ where: { id: record.id } });
+
+      db.prepare(`DELETE FROM ItineraryRecord WHERE id = ?`).run(id);
     }
   );
 });
@@ -245,24 +185,28 @@ describe("SQL injection — Prisma ORM 바인딩", () => {
 // ─── 2. IDOR — DB 레이어 ──────────────────────────────────────────────────────
 
 describe("IDOR — DB 레이어 참여자 격리", () => {
-  test("Carol이 Alice trip 참여자 목록에 없음", async () => {
-    const participant = await (prisma.participantRecord.findFirst)({
-      where: { tripId: aliceTrip.id, address: TEST_ADDRESSES.carol },
-    });
-    expect(participant).toBeNull();
+  test("Carol이 Alice trip 참여자 목록에 없음", () => {
+    const row = db.prepare(
+      `SELECT id FROM ParticipantRecord WHERE tripId = ? AND address = ?`
+    ).get(aliceTripId, TEST_ADDRESSES.carol);
+    expect(row).toBeNull();
   });
 
-  test("Bob이 Alice trip 참여자가 아님", async () => {
-    const aliceParticipants = await (prisma.participantRecord.findMany)({
-      where: { tripId: aliceTrip.id },
-    });
-    expect(aliceParticipants.some((p: { address: string }) => p.address === TEST_ADDRESSES.bob)).toBe(false);
+  test("Bob이 Alice trip 참여자가 아님", () => {
+    const rows = db.prepare(
+      `SELECT address FROM ParticipantRecord WHERE tripId = ?`
+    ).all(aliceTripId) as { address: string }[];
+    expect(rows.some((p) => p.address === TEST_ADDRESSES.bob)).toBe(false);
   });
 
-  test("Bob tripId로 조회해도 Alice trip expense가 노출되지 않음", async () => {
-    const bobExpenses = await (prisma.expenseRecord.findMany)({ where: { tripId: bobTrip.id } });
-    const aliceExpenses = await (prisma.expenseRecord.findMany)({ where: { tripId: aliceTrip.id } });
-    const leaked = bobExpenses.some((be: { id: string }) => aliceExpenses.some((ae: { id: string }) => ae.id === be.id));
+  test("Bob tripId로 조회해도 Alice trip expense가 노출되지 않음", () => {
+    const bobExpenses = db.prepare(
+      `SELECT id FROM ExpenseRecord WHERE tripId = ?`
+    ).all(bobTripId) as { id: string }[];
+    const aliceExpenses = db.prepare(
+      `SELECT id FROM ExpenseRecord WHERE tripId = ?`
+    ).all(aliceTripId) as { id: string }[];
+    const leaked = bobExpenses.some((be) => aliceExpenses.some((ae) => ae.id === be.id));
     expect(leaked).toBe(false);
   });
 });
@@ -271,35 +215,33 @@ describe("IDOR — DB 레이어 참여자 격리", () => {
 
 describe("API 레이어 — requireAuth: Authorization Bearer만 허용", () => {
   test("헤더 없음 → 401", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/expenses`);
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses`);
     expect(res.status).toBe(401);
   });
 
   test("잘못된 Bearer 토큰 → 401", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/expenses`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses`, {
       headers: { Authorization: "Bearer invalid.token.value" },
     });
     expect(res.status).toBe(401);
   });
 
   test("X-Auth-Token 단독 (Bearer 없음) → 401", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/expenses`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses`, {
       headers: { "X-Auth-Token": aliceToken },
     });
     expect(res.status).toBe(401);
   });
 
   test("Cookie 단독 (Bearer 없음) → 401", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/expenses`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses`, {
       headers: { Cookie: `moaarc_token=${aliceToken}` },
     });
     expect(res.status).toBe(401);
   });
 
   test("_t query 단독 (Bearer 없음) → 401", async () => {
-    const res = await app.request(
-      `/api/trips/${aliceTrip.id}/expenses?_t=anyvalue`
-    );
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses?_t=anyvalue`);
     expect(res.status).toBe(401);
   });
 });
@@ -308,14 +250,14 @@ describe("API 레이어 — requireAuth: Authorization Bearer만 허용", () => 
 
 describe("API 레이어 — IDOR: 다른 사용자 리소스 접근 차단", () => {
   test("Bob이 Alice trip expenses 조회 → 403", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/expenses`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses`, {
       headers: { Authorization: `Bearer ${bobToken}` },
     });
     expect(res.status).toBe(403);
   });
 
   test("Alice가 Alice trip expenses 조회 → 200", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/expenses`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses`, {
       headers: { Authorization: `Bearer ${aliceToken}` },
     });
     expect(res.status).toBe(200);
@@ -328,24 +270,18 @@ describe("API 레이어 — IDOR: 다른 사용자 리소스 접근 차단", () 
 
 describe("API 레이어 — requireAdmin: non-admin itinerary POST 차단", () => {
   test("Bob(Alice trip 비참여자)이 Alice trip itinerary POST → 403", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/itinerary`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/itinerary`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${bobToken}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${bobToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ date: "2025-06-01", location: "서울", activity: "관광" }),
     });
     expect(res.status).toBe(403);
   });
 
   test("Bob(bobTrip isAdmin=false)이 bobTrip itinerary POST → 403", async () => {
-    const res = await app.request(`/api/trips/${bobTrip.id}/itinerary`, {
+    const res = await app.request(`/api/trips/${bobTripId}/itinerary`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${bobToken}`,
-        "Content-Type": "application/json",
-      },
+      headers: { Authorization: `Bearer ${bobToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ date: "2025-06-01", location: "부산", activity: "해수욕" }),
     });
     expect(res.status).toBe(403);
@@ -353,120 +289,105 @@ describe("API 레이어 — requireAdmin: non-admin itinerary POST 차단", () =
 });
 
 // ─── 6. Nonce — 원자적 소비 및 재사용 방지 ───────────────────────────────────
-// 6-A: DB 조건 테스트 — updateMany 두 번 직접 호출로 원자성 확인.
-//       verifySignatureAndIssueToken 실제 호출 없이 DB 레이어만 검증.
-// 6-B: 실제 서비스 경합 테스트 — viem synthetic 키로 서명 후
-//       verifySignatureAndIssueToken을 Promise.allSettled 동시 호출.
 
 describe("Nonce — 원자적 소비 및 재사용 방지 (DB 조건 직접 검증)", () => {
-  test("updateMany count=0이면 이미 소비된 nonce — 동시 재사용 시뮬레이션", async () => {
+  test("UPDATE changes=0이면 이미 소비된 nonce — 동시 재사용 시뮬레이션", () => {
+    
     const nonce = "race-nonce-" + Date.now();
-    await (prisma.authNonce.create)({
-      data: {
-        address: TEST_ADDRESSES.alice,
-        nonce,
-        expiresAt: new Date(Date.now() + 300_000),
-        used: false,
-      },
-    });
+    const expiresAt = toIso(new Date(Date.now() + 300_000));
+    db.prepare(
+      `INSERT INTO AuthNonce (id, address, nonce, expiresAt, used) VALUES (?, ?, ?, ?, 0)`
+    ).run(newId(), TEST_ADDRESSES.alice, nonce, expiresAt);
+
+    const now = toIso(new Date());
 
     // 첫 번째 소비 (성공)
-    const first = await (prisma.authNonce.updateMany)({
-      where: { nonce, address: TEST_ADDRESSES.alice, used: false, expiresAt: { gt: new Date() } },
-      data: { used: true },
-    });
-    expect(first.count).toBe(1);
+    // safeIntegers=true에서 changes는 bigint이므로 Number()로 정규화
+    const first = db.prepare(
+      `UPDATE AuthNonce SET used = 1
+       WHERE nonce = ? AND address = ? AND used = 0 AND expiresAt > ?`
+    ).run(nonce, TEST_ADDRESSES.alice, now);
+    expect(Number(first.changes)).toBe(1);
 
-    // 두 번째 소비 (경합 패배 — count=0)
-    const second = await (prisma.authNonce.updateMany)({
-      where: { nonce, address: TEST_ADDRESSES.alice, used: false, expiresAt: { gt: new Date() } },
-      data: { used: true },
-    });
-    expect(second.count).toBe(0);
+    // 두 번째 소비 (경합 패배 — changes=0)
+    const second = db.prepare(
+      `UPDATE AuthNonce SET used = 1
+       WHERE nonce = ? AND address = ? AND used = 0 AND expiresAt > ?`
+    ).run(nonce, TEST_ADDRESSES.alice, now);
+    expect(Number(second.changes)).toBe(0);
   });
 
-  test("nonce unique constraint로 중복 발급 불가", async () => {
+  test("nonce UNIQUE constraint로 중복 발급 불가", () => {
+    
     const nonce = "unique-nonce-" + Date.now();
-    await (prisma.authNonce.create)({
-      data: { address: TEST_ADDRESSES.bob, nonce, expiresAt: new Date(Date.now() + 300_000) },
-    });
+    const expiresAt = toIso(new Date(Date.now() + 300_000));
+    db.prepare(
+      `INSERT INTO AuthNonce (id, address, nonce, expiresAt, used) VALUES (?, ?, ?, ?, 0)`
+    ).run(newId(), TEST_ADDRESSES.bob, nonce, expiresAt);
     let threw = false;
     try {
-      await (prisma.authNonce.create)({
-        data: { address: TEST_ADDRESSES.bob, nonce, expiresAt: new Date(Date.now() + 300_000) },
-      });
+      db.prepare(
+        `INSERT INTO AuthNonce (id, address, nonce, expiresAt, used) VALUES (?, ?, ?, ?, 0)`
+      ).run(newId(), TEST_ADDRESSES.bob, nonce, expiresAt);
     } catch { threw = true; }
     expect(threw).toBe(true);
   });
 
-  test("만료된 nonce는 updateMany 조건에서 제외됨", async () => {
+  test("만료된 nonce는 UPDATE 조건에서 제외됨", () => {
+    
     const nonce = "expired-nonce-" + Date.now();
-    await (prisma.authNonce.create)({
-      data: { address: TEST_ADDRESSES.carol, nonce, expiresAt: new Date(Date.now() - 1_000) },
-    });
-    const result = await (prisma.authNonce.updateMany)({
-      where: { nonce, used: false, expiresAt: { gt: new Date() } },
-      data: { used: true },
-    });
-    expect(result.count).toBe(0);
+    const expiredAt = toIso(new Date(Date.now() - 1_000));
+    db.prepare(
+      `INSERT INTO AuthNonce (id, address, nonce, expiresAt, used) VALUES (?, ?, ?, ?, 0)`
+    ).run(newId(), TEST_ADDRESSES.carol, nonce, expiredAt);
+    const now = toIso(new Date());
+    const result = db.prepare(
+      `UPDATE AuthNonce SET used = 1 WHERE nonce = ? AND used = 0 AND expiresAt > ?`
+    ).run(nonce, now);
+    // safeIntegers=true에서 changes는 bigint
+    expect(Number(result.changes)).toBe(0);
   });
 
   test("verifySignatureAndIssueToken — 잘못된 서명은 서명 검증 단계에서 실패하고 nonce를 소비하지 않음", async () => {
-    // 1. 실제 DB에서 유효한 nonce를 발급
     const validNonce = await issueNonce(TEST_ADDRESSES.alice);
-
-    // 2. bogus signature로 호출 — 서명 검증 단계에서 실패해야 함
-    //    (nonce는 존재하므로 DB 조회는 성공, 서명 불일치로 에러)
     let threw = false;
     try {
       await verifySignatureAndIssueToken(
         TEST_ADDRESSES.alice,
         validNonce,
-        ("0x" + "ab".repeat(65)) as `0x${string}`  // 형식은 맞지만 잘못된 서명
+        ("0x" + "ab".repeat(65)) as `0x${string}`
       );
     } catch { threw = true; }
     expect(threw).toBe(true);
 
-    // 3. 실패 후 nonce의 used 상태가 false로 남아 있어야 함
-    //    (서명 실패는 nonce를 소비하면 안 됨)
-    const nonceRecord = await (prisma.authNonce.findFirst)({
-      where: { address: TEST_ADDRESSES.alice, nonce: validNonce },
-    });
-    // nonce 존재 여부와 used 상태만 검증 — 값은 assertion 메시지에 미포함
-    expect(nonceRecord).not.toBeNull();
-    expect(nonceRecord!.used).toBe(false);
+    // nonce의 used 상태가 0(false)으로 남아 있어야 함
+    // safeIntegers=true에서 used는 bigint(0n)로 반환되므로 Number()로 정규화
+    const row = db.prepare(
+      `SELECT used FROM AuthNonce WHERE nonce = ? AND address = ? LIMIT 1`
+    ).get(validNonce, TEST_ADDRESSES.alice) as { used: number | bigint } | null;
+    expect(row).not.toBeNull();
+    expect(Number(row!.used)).toBe(0);
   });
 });
 
 // ─── 6-B. Nonce — 실제 서비스 경합 테스트 ────────────────────────────────────
-// viem generatePrivateKey + privateKeyToAccount로 메모리 내 synthetic 키 생성.
-// 네트워크·실제 지갑·실제 자금 미사용.
-// 키, nonce, 서명, JWT, 에러 원문은 로그/assertion에 포함하지 않습니다.
 
 describe("Nonce — 실제 서비스 경합 (verifySignatureAndIssueToken + viem synthetic 키)", () => {
   test("같은 nonce/서명을 동시에 두 번 제출하면 성공 1건, 실패 1건", async () => {
-    // 1. viem synthetic 키 생성 (메모리 내, 네트워크 없음)
     const { generatePrivateKey, privateKeyToAccount } = await import("viem/accounts");
     const privateKey = generatePrivateKey();
     const account = privateKeyToAccount(privateKey);
 
-    // 2. 실제 issueNonce로 nonce 발급 (격리 DB에 저장됨)
     const nonce = await issueNonce(account.address);
-
-    // 3. 실제 서명 (viem signMessage — 로컬 연산, 네트워크 없음)
     const signature = await account.signMessage({ message: nonce });
 
-    // 4. 동일 nonce/서명을 Promise.allSettled로 동시 제출
     const [r1, r2] = await Promise.allSettled([
       verifySignatureAndIssueToken(account.address, nonce, signature),
       verifySignatureAndIssueToken(account.address, nonce, signature),
     ]);
 
-    const outcomes = [r1.status, r2.status];
-    const fulfilled = outcomes.filter((s) => s === "fulfilled").length;
-    const rejected  = outcomes.filter((s) => s === "rejected").length;
-
-    // 정확히 성공 1건, 실패 1건 — 값은 assertion에 포함하지 않음
+    const fulfilled = [r1.status, r2.status].filter((s) => s === "fulfilled").length;
+    const rejected  = [r1.status, r2.status].filter((s) => s === "rejected").length;
     expect(fulfilled).toBe(1);
     expect(rejected).toBe(1);
   });
@@ -475,67 +396,46 @@ describe("Nonce — 실제 서비스 경합 (verifySignatureAndIssueToken + viem
 // ─── 7. Unique constraint ─────────────────────────────────────────────────────
 
 describe("Unique constraint", () => {
-  test("동일 chainId+contractAddress+onchainTripId → unique 위반", async () => {
+  test("동일 chainId+contractAddress+onchainTripId → UNIQUE 위반", () => {
+    
+    const now = toIso(new Date());
     let threw = false;
     try {
-      await (prisma.tripRecord.create)({
-        data: {
-          chainId: 5042002,
-          contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-          onchainTripId: BigInt(1), // aliceTrip과 동일
-          name: "duplicate",
-          adminAddress: TEST_ADDRESSES.carol,
-          createTxHash: "0x" + "c".repeat(64),
-        },
-      });
+      db.prepare(
+        `INSERT INTO TripRecord (id, chainId, contractAddress, onchainTripId, name, adminAddress, createTxHash, createdAt, updatedAt)
+         VALUES (?, 5042002, '0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3', 1, 'dup', ?, ?, ?, ?)`
+      ).run(newId(), TEST_ADDRESSES.carol, "0x" + "c".repeat(64), now, now);
     } catch { threw = true; }
     expect(threw).toBe(true);
   });
 
-  test("동일 tripId+address 참여자 → unique 위반", async () => {
+  test("동일 tripId+address 참여자 → UNIQUE 위반", () => {
+    
     let threw = false;
     try {
-      await (prisma.participantRecord.create)({
-        data: {
-          tripId: aliceTrip.id,
-          address: TEST_ADDRESSES.alice, // 이미 존재
-          displayName: "duplicate",
-        },
-      });
+      db.prepare(
+        `INSERT INTO ParticipantRecord (id, tripId, address, displayName, isAdmin) VALUES (?, ?, ?, 'dup', 0)`
+      ).run(newId(), aliceTripId, TEST_ADDRESSES.alice);
     } catch { threw = true; }
     expect(threw).toBe(true);
   });
 
-  test("TripCreationIntent txHash unique constraint", async () => {
+  test("TripCreationIntent txHash UNIQUE constraint", () => {
+    
     const hash = "0x" + "d".repeat(64);
-    await (prisma.tripCreationIntent.create)({
-      data: {
-        creatorAddress: TEST_ADDRESSES.alice,
-        tripName: "intent1",
-        contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-        chainId: 5042002,
-        calldata: "0x",
-        participantAddresses: "[]",
-        targetBudget: "0",
-        status: "pending_tx",
-        txHash: hash,
-      },
-    });
+    const now = toIso(new Date());
+    db.prepare(
+      `INSERT INTO TripCreationIntent
+         (id, creatorAddress, tripName, contractAddress, chainId, calldata, participantAddresses, targetBudget, status, txHash, createdAt, updatedAt)
+       VALUES (?, ?, 'intent1', '0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3', 5042002, '0x', '[]', '0', 'pending_tx', ?, ?, ?)`
+    ).run(newId(), TEST_ADDRESSES.alice, hash, now, now);
     let threw = false;
     try {
-      await (prisma.tripCreationIntent.create)({
-        data: {
-          creatorAddress: TEST_ADDRESSES.bob,
-          tripName: "intent2",
-          contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-          chainId: 5042002,
-          calldata: "0x",
-          participantAddresses: "[]",
-          targetBudget: "0",
-          status: "pending_tx",
-          txHash: hash,
-        },
-      });
+      db.prepare(
+        `INSERT INTO TripCreationIntent
+           (id, creatorAddress, tripName, contractAddress, chainId, calldata, participantAddresses, targetBudget, status, txHash, createdAt, updatedAt)
+         VALUES (?, ?, 'intent2', '0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3', 5042002, '0x', '[]', '0', 'pending_tx', ?, ?, ?)`
+      ).run(newId(), TEST_ADDRESSES.bob, hash, now, now);
     } catch { threw = true; }
     expect(threw).toBe(true);
   });
@@ -584,74 +484,53 @@ describe("입력 allowlist — enum/길이/주소 (동적 import된 함수)", ()
 // ─── 9. Cascade 삭제 ──────────────────────────────────────────────────────────
 
 describe("Cascade 삭제 — TripRecord 삭제 시 하위 레코드 삭제", () => {
-  test("TripRecord 삭제 시 Participant·Expense 모두 삭제됨", async () => {
-    const trip = await (prisma.tripRecord.create)({
-      data: {
-        chainId: 5042002,
-        contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-        onchainTripId: BigInt(999),
-        name: "cascade test",
-        adminAddress: TEST_ADDRESSES.carol,
-        createTxHash: "0x" + "e".repeat(64),
-        participants: {
-          create: { address: TEST_ADDRESSES.carol, displayName: "Carol", isAdmin: true },
-        },
-        expenses: {
-          create: {
-            payerAddress: TEST_ADDRESSES.carol,
-            title: "cascade expense",
-            category: "기타",
-            date: "2025-01-01",
-            totalUsdc: BigInt(0),
-            status: "승인대기",
-            paymentFlow: "community_release",
-            createdBy: TEST_ADDRESSES.carol,
-          },
-        },
-      },
-    });
-    const tripId = trip.id as string;
-    await (prisma.tripRecord.delete)({ where: { id: tripId } });
-    expect(await (prisma.participantRecord.findMany)({ where: { tripId } })).toHaveLength(0);
-    expect(await (prisma.expenseRecord.findMany)({ where: { tripId } })).toHaveLength(0);
+  test("TripRecord 삭제 시 Participant·Expense 모두 삭제됨", () => {
+    
+    const tripId = newId();
+    const expenseId = newId();
+    const now = toIso(new Date());
+
+    db.prepare(
+      `INSERT INTO TripRecord (id, chainId, contractAddress, onchainTripId, name, adminAddress, createTxHash, createdAt, updatedAt)
+       VALUES (?, 5042002, '0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3', 999, 'cascade test', ?, ?, ?, ?)`
+    ).run(tripId, TEST_ADDRESSES.carol, "0x" + "e".repeat(64), now, now);
+    db.prepare(
+      `INSERT INTO ParticipantRecord (id, tripId, address, displayName, isAdmin) VALUES (?, ?, ?, 'Carol', 1)`
+    ).run(newId(), tripId, TEST_ADDRESSES.carol);
+    db.prepare(
+      `INSERT INTO ExpenseRecord
+         (id, tripId, payerAddress, title, category, date, totalUsdc, paymentFlow, status, createdBy, createdAt, updatedAt)
+       VALUES (?, ?, ?, 'cascade expense', '기타', '2025-01-01', 0, 'community_release', '승인대기', ?, ?, ?)`
+    ).run(expenseId, tripId, TEST_ADDRESSES.carol, TEST_ADDRESSES.carol, now, now);
+
+    db.prepare(`DELETE FROM TripRecord WHERE id = ?`).run(tripId);
+
+    const participants = db.prepare(`SELECT id FROM ParticipantRecord WHERE tripId = ?`).all(tripId);
+    const expenses = db.prepare(`SELECT id FROM ExpenseRecord WHERE tripId = ?`).all(tripId);
+    expect(participants).toHaveLength(0);
+    expect(expenses).toHaveLength(0);
   });
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
-// 섹션 9 — STUDIO_TEST_MODE 격리 테스트
-// 실제 서비스 동작을 검증합니다. 합성 데이터만 사용.
-// ══════════════════════════════════════════════════════════════════════════════
+// ─── 10. STUDIO_TEST_MODE ─────────────────────────────────────────────────────
 
 describe("STUDIO_TEST_MODE — 플래그 꺼짐 시 as= 쿼리 무시", () => {
   test("STUDIO_TEST_MODE 없이 as= 쿼리만 있으면 401", async () => {
-    // process.env.STUDIO_TEST_MODE가 "1"이 아닌 상태에서 ?as=... 만으로 인증 시도
-    // beforeAll에서 NODE_ENV=test로 실행되므로 STUDIO_TEST_MODE 미설정 → 우회 불가
     const savedMode = process.env.STUDIO_TEST_MODE;
     process.env.STUDIO_TEST_MODE = undefined as unknown as string;
     try {
-      const res = await app.request(
-        `/api/trips?as=${TEST_ADDRESSES.alice}`,
-        { method: "GET" }
-      );
+      const res = await app.request(`/api/trips?as=${TEST_ADDRESSES.alice}`, { method: "GET" });
       expect(res.status).toBe(401);
       const body = await res.json() as { error: string };
       expect(body.error).toContain("인증이 필요합니다");
     } finally {
-      if (savedMode === undefined) {
-        delete process.env.STUDIO_TEST_MODE;
-      } else {
-        process.env.STUDIO_TEST_MODE = savedMode;
-      }
+      if (savedMode === undefined) delete process.env.STUDIO_TEST_MODE;
+      else process.env.STUDIO_TEST_MODE = savedMode;
     }
   });
 
-  test("production + STUDIO_TEST_MODE=1 조합 시 process.exit(1) 호출 (모킹)", async () => {
-    const isProductionTestMode =
-      process.env.STUDIO_TEST_MODE === "1" &&
-      process.env.NODE_ENV === "production";
-    expect(isProductionTestMode).toBe(false);
-    const wouldExit = (mode: string, env: string) =>
-      mode === "1" && env === "production";
+  test("production + STUDIO_TEST_MODE=1 조합 시 process.exit(1) 호출 (모킹)", () => {
+    const wouldExit = (mode: string, env: string) => mode === "1" && env === "production";
     expect(wouldExit("1", "production")).toBe(true);
     expect(wouldExit("1", "test")).toBe(false);
     expect(wouldExit("0", "production")).toBe(false);
@@ -659,29 +538,22 @@ describe("STUDIO_TEST_MODE — 플래그 꺼짐 시 as= 쿼리 무시", () => {
   });
 });
 
-// ─── 9. STUDIO_TEST_MODE 완전 제거 — Bearer 인증만 허용 ─────────────────────
-
 describe("STUDIO_TEST_MODE 제거: Bearer 이외의 인증 수단 모두 거부", () => {
   test("?as= 쿼리 파라미터로는 인증 불가 → 401", async () => {
-    const res = await app.request(
-      `/api/trips/${aliceTrip.id}/expenses?as=${TEST_ADDRESSES.alice}`
-    );
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses?as=${TEST_ADDRESSES.alice}`);
     expect(res.status).toBe(401);
   });
 
   test("?_t= 쿼리로 인증 불가 → 401", async () => {
-    const res = await app.request(
-      `/api/trips/${aliceTrip.id}/expenses?_t=something`
-    );
+    const res = await app.request(`/api/trips/${aliceTripId}/expenses?_t=something`);
     expect(res.status).toBe(401);
   });
 
   test("STUDIO_TEST_MODE 환경변수로 인증 불가 — API 레이어에서 거부", async () => {
-    // STUDIO_TEST_MODE 없이 Bearer도 없으면 항상 401이어야 함
     const savedMode = process.env.STUDIO_TEST_MODE;
     process.env.STUDIO_TEST_MODE = "1";
     try {
-      const res = await app.request(`/api/trips/${aliceTrip.id}/expenses`);
+      const res = await app.request(`/api/trips/${aliceTripId}/expenses`);
       expect(res.status).toBe(401);
     } finally {
       if (savedMode === undefined) delete process.env.STUDIO_TEST_MODE;
@@ -690,227 +562,156 @@ describe("STUDIO_TEST_MODE 제거: Bearer 이외의 인증 수단 모두 거부"
   });
 });
 
-// ─── 10. addParticipant 전용 보안/멱등성 테스트 ─────────────────────────────
+// ─── 11. addParticipant API 보안 ─────────────────────────────────────────────
 
 describe("addParticipant API 보안", () => {
   test("비인증 → 401", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/participants`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        txHash: "0x" + "a".repeat(64),
-        chainId: 5042002,
+        txHash: "0x" + "a".repeat(64), chainId: 5042002,
         contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-        newParticipantAddress: TEST_ADDRESSES.carol,
-        displayName: "Carol",
+        newParticipantAddress: TEST_ADDRESSES.carol, displayName: "Carol",
       }),
     });
     expect(res.status).toBe(401);
   });
 
   test("비-admin(Bob)이 Alice 여행방에 참여자 추가 → 403", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/participants`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${bobToken}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${bobToken}` },
       body: JSON.stringify({
-        txHash: "0x" + "a".repeat(64),
-        chainId: 5042002,
+        txHash: "0x" + "a".repeat(64), chainId: 5042002,
         contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-        newParticipantAddress: TEST_ADDRESSES.carol,
-        displayName: "Carol",
+        newParticipantAddress: TEST_ADDRESSES.carol, displayName: "Carol",
       }),
     });
     expect(res.status).toBe(403);
   });
 
   test("잘못된 주소 형식 → 400", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/participants`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${aliceToken}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${aliceToken}` },
       body: JSON.stringify({
-        txHash: "0x" + "a".repeat(64),
-        chainId: 5042002,
+        txHash: "0x" + "a".repeat(64), chainId: 5042002,
         contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-        newParticipantAddress: "not-an-address",
-        displayName: "Bad",
+        newParticipantAddress: "not-an-address", displayName: "Bad",
       }),
     });
     expect(res.status).toBe(400);
   });
 
   test("잘못된 txHash → 400", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/participants`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${aliceToken}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${aliceToken}` },
       body: JSON.stringify({
-        txHash: "not-a-hash",
-        chainId: 5042002,
+        txHash: "not-a-hash", chainId: 5042002,
         contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-        newParticipantAddress: TEST_ADDRESSES.carol,
-        displayName: "Carol",
+        newParticipantAddress: TEST_ADDRESSES.carol, displayName: "Carol",
       }),
     });
     expect(res.status).toBe(400);
   });
 
   test("contractAddress 불일치 → 400", async () => {
-    // Alice trip의 contractAddress와 다른 값 전달
-    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/participants`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${aliceToken}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${aliceToken}` },
       body: JSON.stringify({
-        txHash: "0x" + "a".repeat(64),
-        chainId: 5042002,
+        txHash: "0x" + "a".repeat(64), chainId: 5042002,
         contractAddress: "0x1111111111111111111111111111111111111111",
-        newParticipantAddress: TEST_ADDRESSES.carol,
-        displayName: "Carol",
+        newParticipantAddress: TEST_ADDRESSES.carol, displayName: "Carol",
       }),
     });
     expect(res.status).toBe(400);
   });
 
   test("자기 자신(admin) 추가 시도 → 400", async () => {
-    const res = await app.request(`/api/trips/${aliceTrip.id}/participants`, {
+    const res = await app.request(`/api/trips/${aliceTripId}/participants`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${aliceToken}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${aliceToken}` },
       body: JSON.stringify({
-        txHash: "0x" + "a".repeat(64),
-        chainId: 5042002,
+        txHash: "0x" + "a".repeat(64), chainId: 5042002,
         contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-        newParticipantAddress: TEST_ADDRESSES.alice,
-        displayName: "Alice",
+        newParticipantAddress: TEST_ADDRESSES.alice, displayName: "Alice",
       }),
     });
     expect(res.status).toBe(400);
   });
 });
 
-// ─── 네트워크 미들웨어 검증 ────────────────────────────────────────────────────
-// _setVerificationResultForTest로 ready/mismatch/undefined를 주입하여
-// 실제 미들웨어 경로(isNetworkReady → 503 or 통과)를 검증합니다.
-// 각 테스트 후 원래 ready 상태로 복원합니다.
+// ─── 12. 네트워크 readiness 미들웨어 ──────────────────────────────────────────
+
 describe("네트워크 readiness 미들웨어", () => {
-  // chain 모듈을 재사용 (이미 beforeAll에서 동적 import됨)
   let chainMod: {
     _setVerificationResultForTest: (r: import("../lib/chain.js").ServerNetworkVerification | undefined) => void;
   };
 
   const READY_FIXTURE: import("../lib/chain.js").ServerNetworkVerification = {
-    ok: true,
-    chainId: 5042002,
-    bytecodePresent: true,
-    version: "MoaArc-3.0",
-    usdcAddress: "0x3600000000000000000000000000000000000000",
-    usdcDecimals: 6,
-    network: "testnet",
-    contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
-    errors: [],
+    ok: true, chainId: 5042002, bytecodePresent: true, version: "MoaArc-3.0",
+    usdcAddress: "0x3600000000000000000000000000000000000000", usdcDecimals: 6,
+    network: "testnet", contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3", errors: [],
   };
 
-  beforeAll(async () => {
-    chainMod = await import("../lib/chain.js");
-  });
-
-  // 각 테스트 후 ready 상태로 복원 (다른 테스트 영향 없음)
+  beforeAll(async () => { chainMod = await import("../lib/chain.js"); });
   const restoreReady = () => chainMod._setVerificationResultForTest(READY_FIXTURE);
 
-  test("검증 결과가 undefined(아직 시작 전)이면 /api/trips → 503", async () => {
+  test("검증 결과가 undefined이면 /api/trips → 503", async () => {
     chainMod._setVerificationResultForTest(undefined);
     try {
-      const res = await app.request("/api/trips", {
-        headers: { Authorization: `Bearer ${aliceToken}` },
-      });
+      const res = await app.request("/api/trips", { headers: { Authorization: `Bearer ${aliceToken}` } });
       expect(res.status).toBe(503);
       const body = await res.json() as { error: string };
       expect(body.error).toContain("검증");
-    } finally {
-      restoreReady();
-    }
+    } finally { restoreReady(); }
   });
 
   test("ok=false(VERSION 불일치)이면 /api/trips → 503, 오류 메시지 포함", async () => {
     chainMod._setVerificationResultForTest({
-      ok: false,
-      chainId: 5042002,
-      bytecodePresent: true,
-      version: "MoaArc-2.0",
-      usdcAddress: "0x3600000000000000000000000000000000000000",
-      usdcDecimals: 6,
-      network: "testnet",
-      contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+      ok: false, chainId: 5042002, bytecodePresent: true, version: "MoaArc-2.0",
+      usdcAddress: "0x3600000000000000000000000000000000000000", usdcDecimals: 6,
+      network: "testnet", contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
       errors: ['VERSION "MoaArc-2.0" ≠ 기대값 "MoaArc-3.0"'],
     });
     try {
-      const res = await app.request("/api/trips", {
-        headers: { Authorization: `Bearer ${aliceToken}` },
-      });
+      const res = await app.request("/api/trips", { headers: { Authorization: `Bearer ${aliceToken}` } });
       expect(res.status).toBe(503);
       const body = await res.json() as { error: string };
       expect(body.error).toContain("MoaArc-2.0");
-    } finally {
-      restoreReady();
-    }
+    } finally { restoreReady(); }
   });
 
   test("ok=false(chainId 불일치)이면 /api/trips → 503", async () => {
     chainMod._setVerificationResultForTest({
-      ok: false,
-      chainId: 1,           // mainnet chainId (잘못된 값)
-      bytecodePresent: true,
-      version: "MoaArc-3.0",
-      usdcAddress: "0x3600000000000000000000000000000000000000",
-      usdcDecimals: 6,
-      network: "testnet",
-      contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
+      ok: false, chainId: 1, bytecodePresent: true, version: "MoaArc-3.0",
+      usdcAddress: "0x3600000000000000000000000000000000000000", usdcDecimals: 6,
+      network: "testnet", contractAddress: "0x964a772ea94f2a4f03ec3e2ad3df7f3e92a935e3",
       errors: ["RPC chainId=1 ≠ 설정값 5042002"],
     });
     try {
-      const res = await app.request("/api/trips", {
-        headers: { Authorization: `Bearer ${aliceToken}` },
-      });
+      const res = await app.request("/api/trips", { headers: { Authorization: `Bearer ${aliceToken}` } });
       expect(res.status).toBe(503);
-    } finally {
-      restoreReady();
-    }
+    } finally { restoreReady(); }
   });
 
-  test("ok=false(bytecode 없음 — 잘못된 주소)이면 /api/trips → 503", async () => {
+  test("ok=false(bytecode 없음)이면 /api/trips → 503", async () => {
     chainMod._setVerificationResultForTest({
-      ok: false,
-      chainId: 5042002,
-      bytecodePresent: false,
-      network: "testnet",
+      ok: false, chainId: 5042002, bytecodePresent: false, network: "testnet",
       contractAddress: "0x0000000000000000000000000000000000000001",
       errors: ["컨트랙트 0x0000000000000000000000000000000000000001에 코드가 없습니다"],
     });
     try {
-      const res = await app.request("/api/trips", {
-        headers: { Authorization: `Bearer ${aliceToken}` },
-      });
+      const res = await app.request("/api/trips", { headers: { Authorization: `Bearer ${aliceToken}` } });
       expect(res.status).toBe(503);
-    } finally {
-      restoreReady();
-    }
+    } finally { restoreReady(); }
   });
 
-  test("ok=true이면 /api/trips → 503 아님 (인증 결과에 따라 200 or 401)", async () => {
+  test("ok=true이면 /api/trips → 503 아님", async () => {
     chainMod._setVerificationResultForTest(READY_FIXTURE);
-    // 인증 없이 요청 → requireAuth가 401 반환 (미들웨어를 통과했다는 증거)
     const res = await app.request("/api/trips");
     expect(res.status).not.toBe(503);
     expect(res.status).toBe(401);
@@ -918,7 +719,6 @@ describe("네트워크 readiness 미들웨어", () => {
 
   test("ok=true이면 /api/intent → 503 아님", async () => {
     chainMod._setVerificationResultForTest(READY_FIXTURE);
-    // 인증 없이 요청 → 401 (미들웨어 통과 확인)
     const res = await app.request("/api/intent/someId");
     expect(res.status).not.toBe(503);
   });

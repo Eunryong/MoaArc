@@ -14,7 +14,7 @@ Built with [Arc Studio](https://studio.arc.io)
 
 - **Frontend:** React 18, Vite 6, TypeScript 5, Tailwind CSS 3
 - **Web3:** wagmi v2, viem v2, ConnectKit
-- **Backend:** Hono, Bun, Prisma 5, SQLite (개발) / Postgres (프로덕션)
+- **Backend:** Hono, Bun, bun:sqlite (직접 SQL), SQLite
 - **Contracts:** Solidity 0.8.28, Foundry
 - **Chain:** Arc Testnet (Chain ID: 5042002) / Arc Mainnet (Chain ID: 5042) 환경변수로 전환
 - **Token:** USDC (ERC-20, 6 decimals)
@@ -36,18 +36,15 @@ Built with [Arc Studio](https://studio.arc.io)
 # 1. 의존성 설치
 bun install
 
-# 2. Prisma 클라이언트 생성
-bun run db:generate
-
-# 3. 환경변수 설정 (아래 참고)
+# 2. 환경변수 설정 (아래 참고)
 cp env.example .env
 # .env를 편집해서 필수 값 채우기
 
-# 4. 개발 서버 실행 (Vite + 백엔드 동시)
+# 3. 개발 서버 실행 (Vite + 백엔드 동시)
 bun run dev        # Vite (localhost:5173)
 bun run server     # Hono API 서버 (localhost:3001)
 
-# 5. 검사
+# 4. 검사
 bun run check      # lint + typecheck
 bun run contracts:test   # Foundry 계약 테스트 (75개)
 ```
@@ -58,7 +55,6 @@ bun run contracts:test   # Foundry 계약 테스트 (75개)
 git clone https://github.com/Eunryong/MoaArc.git
 cd MoaArc
 bun install             # bun.lock 기반 설치
-bun run db:generate     # Prisma 클라이언트 생성 (필수 — @prisma/client 타입 생성)
 npx tsc --noEmit        # 프런트엔드 typecheck (0 errors 기대)
 npx tsc -p server/tsconfig.json --noEmit   # 서버 typecheck (0 errors 기대)
 bun run check           # lint + typecheck 통합
@@ -76,7 +72,7 @@ bun run check           # lint + typecheck 통합
 
 | 이름 | 목적 |
 |------|------|
-| `DATABASE_URL` | Prisma DB (SQLite: `file:./server/prisma/dev.db`) |
+| `DATABASE_PATH` | SQLite 파일 경로 (기본: `server/prisma/dev.db`) |
 | `JWT_SECRET` | JWT 서명 키 (랜덤 32바이트 이상 권장) |
 | `MOARC_CONTRACT_ADDRESS` | 배포된 MoaArcTreasury 컨트랙트 주소 |
 | `ARC_TESTNET_RPC_FALLBACK` | Arc Testnet 공개 RPC URL |
@@ -85,10 +81,12 @@ bun run check           # lint + typecheck 통합
 
 | 이름 | 목적 |
 |------|------|
-| `MOARC_NETWORK` | `testnet`(기본) 또는 `mainnet` |
-| `MOARC_CHAIN_ID` | 체인 ID 정수 (기본: 5042002) |
-| `MOARC_USDC_ADDRESS` | USDC ERC-20 주소 (mainnet 필수) |
-| `ARC_RPC_URL`, `ARC_RPC_URL_2`, `ARC_RPC_URL_3` | 추가 RPC fallback |
+| `MOARC_NETWORK` | 정확히 소문자 `testnet`(기본) 또는 `mainnet`. 대소문자·공백이 다르거나 다른 값은 오류 (미설정/빈 값만 testnet 기본값) |
+| `MOARC_CHAIN_ID` | 10진 정수. testnet 5042002(기본), mainnet 5042(필수) |
+| `MOARC_USDC_ADDRESS` | USDC 주소 (mainnet 필수, 정확히 `0x3600…0000`) |
+| `MOARC_CONTRACT_VERSION` | 기대 `VERSION()` (mainnet 은 `MoaArc-3.0` 고정) |
+| `ARC_TESTNET_RPC_URL`(`_2`,`_3`), `ARC_RPC_URL`(`_2`,`_3`) | testnet 전용 추가 RPC |
+| `ARC_MAINNET_RPC_URL`(`_2`,`_3`) | mainnet 전용 RPC (https 필수). 범용 `ARC_RPC_URL*`·테스트넷 fallback 은 mainnet 에서 사용 안 함 |
 | `GEMINI_API_KEY` | Google AI Studio 키 (에이전트 기능) |
 | `PORT` | 서버 포트 (기본: 3001) |
 
@@ -96,10 +94,14 @@ bun run check           # lint + typecheck 통합
 
 | 이름 | 목적 |
 |------|------|
-| `VITE_NETWORK` | `testnet`(기본) 또는 `mainnet` |
-| `VITE_CONTRACT_ADDRESS` | mainnet 배포 시 필수 |
-| `VITE_USDC_ADDRESS` | mainnet 배포 시 필수 |
-| `VITE_CHAIN_ID` | mainnet 배포 시 필수 |
+| `VITE_NETWORK` | 정확히 소문자 `testnet`(기본) 또는 `mainnet` (서버 `MOARC_NETWORK` 와 동일 규칙) |
+| `VITE_CONTRACT_ADDRESS` | mainnet 배포 시 필수 (테스트넷 배포 주소 거부) |
+| `VITE_USDC_ADDRESS` | mainnet 배포 시 필수, 정확히 `0x3600…0000` |
+| `VITE_CHAIN_ID` | mainnet 배포 시 필수 (`5042`) |
+| `VITE_CONTRACT_VERSION` | 선택, mainnet 은 `MoaArc-3.0` 고정 |
+
+Arc Mainnet 준비 체크리스트와 수동 Foundry 배포 절차는 [docs/MAINNET_DEPLOYMENT.md](docs/MAINNET_DEPLOYMENT.md) 를 참고하세요.
+현재 mainnet 에 배포된 컨트랙트는 없습니다. 설정이 하나라도 잘못되면 앱은 온체인 write 를 차단합니다(fail-closed).
 
 Arc Studio 환경에서 자동 주입되는 변수: `RPC_PROXY_BASE_URL`, `RPC_PROXY_TOKEN`, `RPC_PROXY_CHAINS` (Arc Studio 외부에서는 불필요).
 

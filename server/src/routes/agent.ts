@@ -18,7 +18,7 @@
 
 import { Hono } from "hono";
 import { requireAuth } from "../middleware/requireAuth.js";
-import { prisma } from "../lib/prisma.js";
+import { getDb, newId, toIso, parseDateField } from "../lib/db.js";
 
 const agent = new Hono();
 
@@ -33,8 +33,8 @@ interface ItineraryDraftItem {
   estMinUsdc?: string | null;
   estMaxUsdc?: string | null;
   estCurrency?: string | null;
-  estSource?: string | null;   // grounding에서 추출한 실제 URL
-  confidence?: string | null; // high | medium | low | none
+  estSource?: string | null;
+  confidence?: string | null;
 }
 
 interface AgentProposal {
@@ -76,12 +76,7 @@ async function callGemini(opts: {
 }> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return {
-      text: "",
-      searchUsed: false,
-      sources: [],
-      error: "GEMINI_API_KEY가 서버에 설정되지 않았습니다.",
-    };
+    return { text: "", searchUsed: false, sources: [], error: "GEMINI_API_KEY가 서버에 설정되지 않았습니다." };
   }
 
   const model = process.env.GEMINI_MODEL ?? "gemini-2.0-flash";
@@ -125,15 +120,11 @@ ${opts.tripContext}
 }
 proposal이 없으면 "proposal": null 로 설정하세요.`;
 
-  // 검색이 필요할 때만 tools에 googleSearch 포함
   const tools = opts.useSearch ? [{ googleSearch: {} }] : [];
 
   const requestBody = {
     contents: [
-      {
-        role: "user",
-        parts: [{ text: `${systemPrompt}\n\n사용자 요청: ${opts.userMessage}` }],
-      },
+      { role: "user", parts: [{ text: `${systemPrompt}\n\n사용자 요청: ${opts.userMessage}` }] },
     ],
     ...(tools.length > 0 ? { tools } : {}),
     generationConfig: {
@@ -157,52 +148,31 @@ proposal이 없으면 "proposal": null 로 설정하세요.`;
 
   if (!response.ok) {
     const errText = await response.text();
-    // API 키나 세부 내용은 로그에만, 사용자에게는 상태 코드만
     console.error("[Gemini API error]", response.status, errText.slice(0, 200));
-    return {
-      text: "",
-      searchUsed: false,
-      sources: [],
-      error: `Gemini API 오류 (${response.status}). 잠시 후 다시 시도해주세요.`,
-    };
+    return { text: "", searchUsed: false, sources: [], error: `Gemini API 오류 (${response.status}). 잠시 후 다시 시도해주세요.` };
   }
 
   const data = await response.json() as GeminiResponse;
   const candidate = data.candidates?.[0];
   const rawText = candidate?.content?.parts?.[0]?.text ?? "";
 
-  // grounding 출처 추출 (실제 검색이 이뤄진 경우에만 존재)
   const groundingMeta = candidate?.groundingMetadata;
   const searchUsed = (groundingMeta?.webSearchQueries?.length ?? 0) > 0;
-  const sources: Array<{ url: string; title?: string }> = (
-    groundingMeta?.groundingChunks ?? []
-  )
+  const sources: Array<{ url: string; title?: string }> = (groundingMeta?.groundingChunks ?? [])
     .filter((c) => c.web?.uri)
     .map((c) => ({ url: c.web!.uri!, title: c.web!.title }));
 
-  // JSON 파싱
   try {
     const parsed = JSON.parse(rawText) as { message?: string; proposal?: AgentProposal | null };
-
-    // proposal에 근거 없는 가격이 있는데 검색을 하지 않았다면 estSource를 null로 보정
     const proposal = parsed.proposal ?? undefined;
     if (proposal?.itineraryDrafts && !searchUsed) {
       for (const draft of proposal.itineraryDrafts) {
-        draft.estMinUsdc = null;
-        draft.estMaxUsdc = null;
-        draft.estSource = null;
-        draft.confidence = "none";
+        draft.estMinUsdc = null; draft.estMaxUsdc = null;
+        draft.estSource = null; draft.confidence = "none";
       }
     }
-
-    return {
-      text: parsed.message ?? rawText,
-      proposal,
-      searchUsed,
-      sources,
-    };
+    return { text: parsed.message ?? rawText, proposal, searchUsed, sources };
   } catch {
-    // 파싱 실패: 텍스트만 반환, proposal 없음
     return { text: rawText, searchUsed, sources };
   }
 }
@@ -224,123 +194,116 @@ agent.post("/chat", requireAuth, async (c) => {
     return c.json({ error: "메시지가 너무 깁니다 (최대 2000자)." }, 400);
   }
 
-  // tripDbId가 있으면 참여자 권한 확인
   let tripContext = "여행방 정보 없음";
   if (body.tripDbId) {
-    const participant = await prisma.participantRecord.findFirst({
-      where: { tripId: body.tripDbId, address: caller },
-    });
-    if (!participant) {
-      return c.json({ error: "이 여행방의 참여자가 아닙니다." }, 403);
-    }
+    const db = getDb();
+    const participant = db.prepare(
+      `SELECT id FROM ParticipantRecord WHERE tripId = ? AND address = ? LIMIT 1`
+    ).get(body.tripDbId, caller.toLowerCase());
+    if (!participant) return c.json({ error: "이 여행방의 참여자가 아닙니다." }, 403);
 
-    const trip = await prisma.tripRecord.findUnique({
-      where: { id: body.tripDbId },
-      include: { participants: true },
-    });
-    if (trip) {
-      const itinerary = await prisma.itineraryRecord.findMany({
-        where: { tripId: trip.id, status: { not: "cancelled" } },
-        orderBy: [{ date: "asc" }],
-        take: 20,
-      });
+    const tripRow = db.prepare(
+      `SELECT id, name, createdAt FROM TripRecord WHERE id = ? LIMIT 1`
+    ).get(body.tripDbId) as { id: string; name: string; createdAt: string | number } | null;
+
+    if (tripRow) {
+      // safeIntegers=true에서 COUNT(*)는 bigint이므로 Number()로 정규화
+      const participantCount = Number(
+        (db.prepare(
+          `SELECT COUNT(*) as cnt FROM ParticipantRecord WHERE tripId = ?`
+        ).get(body.tripDbId) as { cnt: number | bigint }).cnt
+      );
+
+      const itinerary = db.prepare(
+        `SELECT date, time, location, activity FROM ItineraryRecord
+         WHERE tripId = ? AND status != 'cancelled'
+         ORDER BY date ASC LIMIT 20`
+      ).all(body.tripDbId) as { date: string; time: string | null; location: string; activity: string }[];
+
       const itineraryText = itinerary
         .map((i) => `- ${i.date} ${i.time ?? ""} ${i.location}: ${i.activity}`)
         .join("\n");
       tripContext = [
-        `여행명: ${trip.name}`,
-        `참여자 수: ${trip.participants.length}`,
-        `생성일: ${trip.createdAt.toLocaleDateString("ko")}`,
+        `여행명: ${tripRow.name}`,
+        `참여자 수: ${participantCount}`,
+        `생성일: ${(parseDateField(tripRow.createdAt) ?? new Date(0)).toLocaleDateString("ko")}`,
         itinerary.length > 0 ? `\n현재 일정 (${itinerary.length}건):\n${itineraryText}` : "등록된 일정 없음",
       ].join("\n");
     }
   }
 
-  // Gemini 미설정 시 즉시 반환
   if (!process.env.GEMINI_API_KEY) {
     return c.json({
       role: "agent",
       content: "에이전트 실시간 검색이 아직 설정되지 않았습니다.\n서버에 GEMINI_API_KEY 환경변수를 설정하면 활성화됩니다.",
-      hasError: true,
-      errorDetail: "GEMINI_API_KEY 미설정",
-      proposal: null,
-      searchUsed: false,
-      sources: [],
+      hasError: true, errorDetail: "GEMINI_API_KEY 미설정",
+      proposal: null, searchUsed: false, sources: [],
     });
   }
 
-  // 검색 여부: requestCostSearch=true 또는 비용 관련 키워드 포함
   const COST_KEYWORDS = /비용|얼마|가격|견적|예산|숙소 요금|식당 가격|입장료|교통 요금|티켓/;
   const useSearch = body.requestCostSearch === true || COST_KEYWORDS.test(body.message);
 
-  const result = await callGemini({
-    userMessage: body.message,
-    tripContext,
-    useSearch,
-  });
+  const result = await callGemini({ userMessage: body.message, tripContext, useSearch });
 
   if (result.error) {
     return c.json({
-      role: "agent",
-      content: result.error,
-      hasError: true,
-      errorDetail: result.error,
-      proposal: null,
-      searchUsed: false,
-      sources: [],
+      role: "agent", content: result.error, hasError: true, errorDetail: result.error,
+      proposal: null, searchUsed: false, sources: [],
     });
   }
 
-  // 대화 기록 저장 (tripDbId가 있을 때만)
   if (body.tripDbId) {
     try {
-      await prisma.agentConversation.create({
-        data: {
-          tripId: body.tripDbId,
-          address: caller,
-          role: "agent",
-          content: result.text,
-          hasError: false,
-          proposal: result.proposal ? JSON.stringify(result.proposal) : null,
-        },
-      });
+      const db = getDb();
+      const now = toIso(new Date());
+      db.prepare(
+        `INSERT INTO AgentConversation (id, tripId, address, role, content, hasError, proposal, createdAt)
+         VALUES (?, ?, ?, 'agent', ?, 0, ?, ?)`
+      ).run(newId(), body.tripDbId, caller.toLowerCase(), result.text,
+        result.proposal ? JSON.stringify(result.proposal) : null, now);
     } catch (e) {
       console.error("[agent] conversation save failed:", String(e));
     }
   }
 
   return c.json({
-    role: "agent",
-    content: result.text,
-    hasError: false,
+    role: "agent", content: result.text, hasError: false,
     proposal: result.proposal ?? null,
-    searchUsed: result.searchUsed,
-    sources: result.sources,  // grounding에서 추출한 실제 출처
+    searchUsed: result.searchUsed, sources: result.sources,
     retrievedAt: new Date().toISOString(),
   });
 });
 
 // ─── GET /api/agent/history/:tripDbId ─────────────────────────────────────────
-// 참여자만 접근 가능
 
 agent.get("/history/:tripDbId", requireAuth, async (c) => {
-  const tripDbId = c.req.param("tripDbId");
+  const tripDbId = c.req.param("tripDbId") ?? "";
   const caller = c.get("callerAddress");
+  const db = getDb();
 
-  // 참여자 확인
-  const participant = await prisma.participantRecord.findFirst({
-    where: { tripId: tripDbId, address: caller },
-  });
-  if (!participant) {
-    return c.json({ error: "이 여행방의 참여자가 아닙니다." }, 403);
-  }
+  const participant = db.prepare(
+    `SELECT id FROM ParticipantRecord WHERE tripId = ? AND address = ? LIMIT 1`
+  ).get(tripDbId, caller.toLowerCase());
+  if (!participant) return c.json({ error: "이 여행방의 참여자가 아닙니다." }, 403);
 
-  const history = await prisma.agentConversation.findMany({
-    where: { tripId: tripDbId },  // 여행방 전체 대화 (참여자 확인 후)
-    orderBy: { createdAt: "asc" },
-    take: 100,
+  const history = db.prepare(
+    `SELECT id, tripId, address, role, content, hasError, proposal, createdAt
+     FROM AgentConversation WHERE tripId = ? ORDER BY createdAt ASC LIMIT 100`
+  ).all(tripDbId) as {
+    id: string; tripId: string; address: string; role: string;
+    content: string; hasError: number | bigint; proposal: string | null;
+    createdAt: string | number;
+  }[];
+
+  return c.json({
+    history: history.map((h) => ({
+      ...h,
+      // safeIntegers=true: hasError는 bigint(0n/1n)이므로 Number()로 정규화
+      hasError: Number(h.hasError) !== 0,
+      createdAt: parseDateField(h.createdAt) ?? new Date(0),
+    })),
   });
-  return c.json({ history });
 });
 
 export default agent;

@@ -3,6 +3,7 @@
 // MoaArkTreasury 컨트랙트에서 실제 상태를 읽어옵니다.
 // DEMO 모드에서는 호출하지 마세요.
 
+import { useMemo } from "react";
 import { useReadContract, useReadContracts } from "wagmi";
 import {
   MOAARK_ABI,
@@ -11,6 +12,12 @@ import {
 } from "./contractAbi";
 import { NETWORK_CONFIG } from "./networkConfig";
 import type { SettlementStatus } from "./types";
+import {
+  parseParticipantBalances,
+  type BatchStatus,
+  type ContractReadResult,
+  type ParticipantOnchainRow,
+} from "./onchainReads";
 
 // 편의 상수 — networkConfig를 읽어 사용
 const MOAARK_ADDRESS = NETWORK_CONFIG.contractAddress;
@@ -67,6 +74,67 @@ export function useAllocatedBudget(
     chainId: CHAIN_ID,
     query: { enabled: enabled && !!participantAddress, refetchInterval: 15_000 },
   });
+}
+
+// ─── 참여자 전원의 depositedAmount / allocatedBudget / spentFromBudget (배치) ──
+//
+// 참여자 i 당 3개 읽기가 [deposited, allocated, spent] 순서로 평탄화됩니다.
+// (PARTICIPANT_READ_FUNCTIONS 순서와 parseParticipantBalances 가 이에 의존)
+// 개별 읽기가 실패하면 그 참여자는 rows 에서 빠지고 0n 으로 채워지지 않습니다.
+
+export function useParticipantBalances(
+  tripId: bigint,
+  participantAddresses: readonly string[],
+  enabled = true,
+  tripContractAddress?: string,
+): {
+  rows: Record<string, ParticipantOnchainRow>;
+  status: BatchStatus;
+  refetch: () => void;
+} {
+  const active = enabled && tripId > 0n && participantAddresses.length > 0 && !isLegacyTrip(tripContractAddress);
+  const addressKey = participantAddresses.map((a) => a.toLowerCase()).join(",");
+
+  const contracts = useMemo(
+    () =>
+      addressKey
+        ? addressKey.split(",").flatMap((addr) => {
+            const a = addr as `0x${string}`;
+            return [
+              { address: MOAARK_ADDRESS, abi: MOAARK_ABI, functionName: "depositedAmount", args: [tripId, a], chainId: CHAIN_ID },
+              { address: MOAARK_ADDRESS, abi: MOAARK_ABI, functionName: "allocatedBudget", args: [tripId, a], chainId: CHAIN_ID },
+              { address: MOAARK_ADDRESS, abi: MOAARK_ABI, functionName: "spentFromBudget", args: [tripId, a], chainId: CHAIN_ID },
+            ] as const;
+          })
+        : [],
+    [addressKey, tripId],
+  );
+
+  const result = useReadContracts({
+    contracts,
+    allowFailure: true,
+    query: { enabled: active, refetchInterval: 15_000 },
+  });
+
+  let status: BatchStatus;
+  if (!active) status = "disabled";
+  else if (result.isError) status = "error";
+  else if (result.data === undefined) status = "loading";
+  else status = "ok";
+
+  // 마지막 갱신이 실패(isError)했다면 react-query 가 이전 data 를 들고 있어도 최신값으로 취급하지 않습니다.
+  const rows = useMemo(
+    () =>
+      status === "ok"
+        ? parseParticipantBalances(
+            addressKey ? addressKey.split(",") : [],
+            result.data as readonly ContractReadResult[] | undefined,
+          )
+        : {},
+    [addressKey, result.data, status],
+  );
+
+  return { rows, status, refetch: () => { void result.refetch(); } };
 }
 
 // ─── isParticipant 확인 ──────────────────────────────────────────────────

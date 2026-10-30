@@ -7,6 +7,7 @@ import React, {
 } from "react";
 import en, { type I18nKeys } from "./en";
 import ko from "./ko";
+import { fmtUsdc as fmtUsdcExact } from "../calculations";
 
 type Lang = "en" | "ko";
 const STORAGE_KEY = "moaarc.lang";
@@ -52,12 +53,10 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     [lang],
   );
 
-  // Format USDC amount — en: "12.50 USDC", ko: "12.50 USDC" (same for now, room to diverge)
+  // Format USDC amount (6 decimals) exactly — no Number/float math, no rounding or truncation.
+  // The `decimals` parameter is kept for call-site compatibility; USDC always has 6 decimals.
   const fmtUsdc = useCallback(
-    (raw: bigint, decimals = 6) => {
-      const num = Number(raw) / 10 ** decimals;
-      return `${num.toFixed(2)} USDC`;
-    },
+    (raw: bigint, _decimals = 6) => `${fmtUsdcExact(raw)} USDC`,
     [],
   );
 

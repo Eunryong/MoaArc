@@ -14,7 +14,6 @@
         "@circle-fin/w3s-pw-web-sdk": "^1.1.11",
         "@hono/node-server": "^2.1.5",
         "@openzeppelin/contracts": "5.1.0",
-        "@prisma/client": "5.22.0",
         "@tanstack/react-query": "^5.62.7",
         "@web3icons/react": "^4.0.0",
         "clsx": "^2.1.1",
@@ -23,7 +22,6 @@
         "hono": "^4.13.13",
         "jose": "^6.2.12",
         "lucide-react": "^0.468.0",
-        "prisma": "5.22.0",
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
         "sonner": "^1.7.1",
@@ -483,18 +481,6 @@
     "@paulmillr/qr": ["@paulmillr/qr@0.2.1", "", {}, "sha512-IHnV6A+zxU7XwmKFinmYjUcwlyK9+xkG3/s9KcQhI9BjQKycrJ1JRO+FbNYPwZiPKW3je/DR0k7w8/gLa5eaxQ=="],
 
     "@pinojs/redact": ["@pinojs/redact@0.4.0", "", {}, "sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg=="],
-
-    "@prisma/client": ["@prisma/client@5.22.0", "", { "peerDependencies": { "prisma": "*" }, "optionalPeers": ["prisma"] }, "sha512-M0SVXfyHnQREBKxCgyo7sffrKttwE6R8PMq330MIUF0pTwjUhLbW84pFDlf06B27XyCR++VtjugEnIHdr07SVA=="],
-
-    "@prisma/debug": ["@prisma/debug@5.22.0", "", {}, "sha512-AUt44v3YJeggO2ZU5BkXI7M4hu9BF2zzH2iF2V5pyXT/lRTyWiElZ7It+bRH1EshoMRxHgpYg4VB6rCM+mG5jQ=="],
-
-    "@prisma/engines": ["@prisma/engines@5.22.0", "", { "dependencies": { "@prisma/debug": "5.22.0", "@prisma/engines-version": "5.22.0-44.605197351a3c8bdd595af2d2a9bc3025bca48ea2", "@prisma/fetch-engine": "5.22.0", "@prisma/get-platform": "5.22.0" } }, "sha512-UNjfslWhAt06kVL3CjkuYpHAWSO6L4kDCVPegV6itt7nD1kSJavd3vhgAEhjglLJJKEdJ7oIqDJ+yHk6qO8gPA=="],
-
-    "@prisma/engines-version": ["@prisma/engines-version@5.22.0-44.605197351a3c8bdd595af2d2a9bc3025bca48ea2", "", {}, "sha512-2PTmxFR2yHW/eB3uqWtcgRcgAbG1rwG9ZriSvQw+nnb7c4uCr3RAcGMb6/zfE88SKlC1Nj2ziUvc96Z379mHgQ=="],
-
-    "@prisma/fetch-engine": ["@prisma/fetch-engine@5.22.0", "", { "dependencies": { "@prisma/debug": "5.22.0", "@prisma/engines-version": "5.22.0-44.605197351a3c8bdd595af2d2a9bc3025bca48ea2", "@prisma/get-platform": "5.22.0" } }, "sha512-bkrD/Mc2fSvkQBV5EpoFcZ87AvOgDxbG99488a5cexp5Ccny+UM6MAe/UFkUC0wLYD9+9befNOqGiIJhhq+HbA=="],
-
-    "@prisma/get-platform": ["@prisma/get-platform@5.22.0", "", { "dependencies": { "@prisma/debug": "5.22.0" } }, "sha512-pHhpQdr1UPFpt+zFfnPazhulaZYCUqeIcPpJViYoq9R+D/yw4fjE+CtnsnKzPYm0ddUbeXUzjGVGIRVgPDCk4Q=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 
@@ -1433,8 +1419,6 @@
     "postcss-value-parser": ["postcss-value-parser@4.2.0", "", {}, "sha512-1NNCs6uurfkVbeXG4S8JFT9t19m45ICnif8zWLd5oPSZ50QnwMfK+H3jv408d4jw/7Bttv5axS5IiHoLaVNHeQ=="],
 
     "preact": ["preact@10.24.2", "", {}, "sha512-1cSoF0aCC8uaARATfrlz4VCBqE8LwZwRfLgkxJOQwAlQt6ayTmi0D9OF7nXid1POI5SZidFuG9CnlXbDfLqY/Q=="],
-
-    "prisma": ["prisma@5.22.0", "", { "dependencies": { "@prisma/engines": "5.22.0" }, "optionalDependencies": { "fsevents": "2.3.3" }, "bin": { "prisma": "build/index.js" } }, "sha512-vtpjW3XuYCSnMsNVBjLMNkTj6OZbudcPPTPYHqX0CJfpcdWciI1dM8uHETwmDxxiqEwCIE6WvXucWUetJgfu/A=="],
 
     "process": ["process@0.11.10", "", {}, "sha512-cdGef/drWFoydD1JsMzuFf8100nZl+GT+yacc2bEced5f9Rjk4z+WtFUTBu9PhOi9j/jfmBPu0mMEY4wIdAF8A=="],
 

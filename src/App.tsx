@@ -1,14 +1,16 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from "react";
 import { useI18n } from "./i18n";
 import { useAccount, useChainId, useSignMessage, useSwitchChain } from "wagmi";
 import { ConnectKitButton } from "connectkit";
 import type { ParticipantId, Trip, AgentMessage, ExpenseCategory } from "./types";
 import { calcParticipantSummary } from "./calculations";
-import { NETWORK_CONFIG, addressExplorerUrl, CONFIG_VALID } from "./networkConfig";
+import { apiRecordToTrip } from "./tripMapping";
+import { applyOnchainBalances } from "./onchainReads";
+import { useParticipantBalances } from "./useContractState";
+import { NETWORK_CONFIG, NETWORK_LABEL, addressExplorerUrl, CONFIG_VALID } from "./networkConfig";
 import {
   useServerHealth,
   useNetworkMatch,
-  useAuthState,
   useMyTrips,
   useTripItinerary,
   useTripExpenses,
@@ -18,9 +20,9 @@ import { markNotificationRead } from "./apiClient";
 import {
   fetchNonce,
   verifySignature,
-  clearToken,
-  type TripApiRecord,
+  clearTokenIfEquals,
 } from "./apiClient";
+import { useWalletSession } from "./useWalletSession";
 import TopSummaryBar from "./components/TopSummaryBar";
 import DashboardTab from "./components/DashboardTab";
 import MyExpensesTab from "./components/MyExpensesTab";
@@ -30,35 +32,6 @@ import ItineraryTab from "./components/ItineraryTab";
 import { CreateTripModal } from "./components/CreateTripModal";
 
 type Tab = "dashboard" | "my" | "expenses" | "settlement" | "itinerary";
-
-// TripApiRecord → Trip 최소 변환 (온체인 잔액은 useContractState에서 별도 읽음)
-function apiRecordToTrip(r: TripApiRecord): Trip {
-  return {
-    id: r.id,
-    name: r.name,
-    contractAddress: r.contractAddress,
-    onchainTripId: BigInt(r.onchainTripId),
-    adminId: (r.participants.find((p) => p.isAdmin)?.address ?? r.adminAddress) as ParticipantId,
-    participants: r.participants.map((p, i) => ({
-      id: (["A", "B", "C", "D"][i] ?? p.address.slice(2, 4)) as ParticipantId,
-      name: p.displayName,
-      address: p.address,
-      isAdmin: p.isAdmin,
-      depositedAmount: 0n,
-      plannedDeposit: 0n,
-      allocatedBudget: 0n,
-      spentFromBudget: 0n,
-      personalPrepaid: 0n,
-      paidDeficit: 0n,
-      refundClaimed: false,
-    })),
-    targetBudget: 0n,
-    settlement: null,
-    expenses: [],
-    itinerary: [],
-    createdAt: r.createdAt,
-  };
-}
 
 export default function App() {
   const { t, lang, setLang } = useI18n();
@@ -74,7 +47,7 @@ export default function App() {
 
   // ─── TESTNET 상태 ──────────────────────────────────────────────────────
   const [selectedDbTripId, setSelectedDbTripId] = useState<string | null>(null);
-  const [trip, setTrip] = useState<Trip | null>(null);
+  const [rawTrip, setTrip] = useState<Trip | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([]);
@@ -83,7 +56,7 @@ export default function App() {
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   // ─── 지갑·체인 ─────────────────────────────────────────────────────────
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, status: walletStatus } = useAccount();
   const chainId = useChainId();
   const { signMessageAsync } = useSignMessage();
   const { switchChain, isPending: isSwitchingChain, error: switchChainError } = useSwitchChain();
@@ -92,18 +65,46 @@ export default function App() {
   const { serverOnline, geminiConfigured, checking: serverChecking } = useServerHealth();
   // 서버 네트워크 일치 확인 — 불일치 시 지갑 서명 차단
   const { networkReady, errors: networkErrors } = useNetworkMatch(serverOnline);
-  const { isAuthenticated, isExpired, refresh: refreshAuth, markExpired } = useAuthState(address);
+
+  // ─── 지갑 세션 (연결 상태 ↔ 토큰 subject 검증 ↔ 스코프 리셋) ───────────────
+  // 비공개 화면은 session.isAuthenticated(지갑 connected + 토큰 subject == 지갑 주소 + 미만료)일 때만 렌더됩니다.
+  // 스코프(계정/로그인 상태)가 바뀌면 아래 비공개 화면 상태를 모두 비웁니다.
+  const resetPrivateState = useCallback(() => {
+    setTrip(null);
+    setSelectedDbTripId(null);
+    setAgentMessages([]);
+    setAuthError(null);
+    setAuthLoading(false);
+    setShowCreateModal(false);
+    setActiveTab("dashboard");
+  }, []);
+  const session = useWalletSession(
+    { status: walletStatus, address },
+    { onScopeReset: resetPrivateState },
+  );
+  const { isAuthenticated, isExpired, refresh: refreshAuth, markExpired, scope } = session;
+  // 렌더에 쓰는 trip 은 인증된 세션에서만 존재 (미인증/연결 해제 시 즉시 null)
+  const trip = isAuthenticated ? rawTrip : null;
+  // 로그인 중 지갑이 바뀌었는지 비동기 흐름에서 확인하기 위한 최신 지갑 정보
+  const walletRef = useRef({ address, status: walletStatus });
+  useLayoutEffect(() => { walletRef.current = { address, status: walletStatus }; });
 
   // ─── 여행방 목록 ───────────────────────────────────────────────────────
   // 서버 온라인 + 인증됨일 때만 활성화. 401 발생 시 markExpired 호출
   const {
-    trips: serverTrips,
+    trips: fetchedTrips,
     loading: tripsLoading,
     error: tripsError,
     loadedOnce: tripsLoadedOnce,
     reload: reloadTrips,
     clearError: clearTripsError,
-  } = useMyTrips(serverOnline && isAuthenticated, markExpired);
+  } = useMyTrips(serverOnline && isAuthenticated, markExpired, scope);
+  // 방어: 서버가 돌려준 방이라도 현재 지갑이 참여자가 아니면 렌더하지 않음
+  const serverTrips = useMemo(
+    () => fetchedTrips.filter((tr) =>
+      !!address && tr.participants.some((p) => p.address.toLowerCase() === address.toLowerCase())),
+    [fetchedTrips, address],
+  );
 
   // ─── 선택된 여행방 알림 ────────────────────────────────────────────────
   const {
@@ -112,7 +113,8 @@ export default function App() {
     reload: reloadNotifications,
   } = useTripNotifications(
     selectedDbTripId,
-    serverOnline && isAuthenticated && !!selectedDbTripId
+    serverOnline && isAuthenticated && !!selectedDbTripId,
+    scope,
   );
 
   // ─── 선택된 여행방 일정·지출 ───────────────────────────────────────────
@@ -121,14 +123,16 @@ export default function App() {
     reload: reloadItinerary,
   } = useTripItinerary(
     selectedDbTripId,
-    serverOnline && isAuthenticated && !!selectedDbTripId
+    serverOnline && isAuthenticated && !!selectedDbTripId,
+    scope,
   );
   const {
     expenses: serverExpenses,
     reload: reloadExpenses,
   } = useTripExpenses(
     selectedDbTripId,
-    serverOnline && isAuthenticated && !!selectedDbTripId
+    serverOnline && isAuthenticated && !!selectedDbTripId,
+    scope,
   );
 
   // ─── 여행방 목록 → 최초 선택 ──────────────────────────────────────────
@@ -253,27 +257,13 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- trip은 setTrip(prev=>) 내부에서만 쓰여 dep 불필요
   }, [serverItinerary, serverExpenses, selectedDbTripId]); // trip 의도적 제외: setTrip(prev=>) 패턴
 
-  // ─── 지갑 주소 변경 시 데이터 초기화 ──────────────────────────────────
-  // address ref: 실제 주소가 달라진 경우(A→B)에만 토큰을 삭제한다.
-  // 같은 지갑에서 체인만 전환되면 wagmi가 일시적으로 address를 undefined로 내보낼 수 있으므로
-  // undefined → 주소 복귀 시에는 clearToken을 하지 않는다.
-  const prevAddressRef = useRef<string | undefined>(address);
-  useEffect(() => {
-    const prev = prevAddressRef.current;
-    prevAddressRef.current = address;
+  // ─── 지갑 주소 변경 / 연결 해제 처리 ──────────────────────────────────
+  // useWalletSession 이 담당합니다: 계정 전환·disconnect 시 즉시 화면을 숨기고 위 resetPrivateState 로
+  // 상태를 비우며, 떠나는 계정의 토큰만 삭제합니다. connecting/reconnecting(새로고침·체인 전환)은
+  // 일시 상태로 취급해 토큰을 지우지 않습니다.
 
-    if (prev && address && prev.toLowerCase() !== address.toLowerCase()) {
-      clearToken();
-      refreshAuth();
-      setTrip(null);
-      setSelectedDbTripId(null);
-      setAgentMessages([]);
-      setAuthError(null);
-    }
-  }, [address, refreshAuth]);
-
-  // ─── 체인 전환 감지: 다른 체인 → Arc Testnet(5042002) ─────────────────
-  // 사용자가 지갑에서 수동으로 Arc Testnet으로 전환하면:
+  // ─── 체인 전환 감지: 다른 체인 → 설정된 체인 (NETWORK_CONFIG.chainId) ──────
+  // 사용자가 지갑에서 수동으로 설정된 네트워크로 전환하면:
   // 1) stale 오류 메시지를 즉시 제거
   // 2) 세션 토큰이 있으면 여행방 목록을 재요청
   // 자동 체인 전환·서명·거래는 절대 하지 않음.
@@ -284,7 +274,7 @@ export default function App() {
 
     const targetChainId = NETWORK_CONFIG.chainId;
     if (prev !== chainId && chainId === targetChainId && prev !== targetChainId) {
-      // Arc Testnet으로 전환됨 — stale 오류 모두 제거
+      // 설정된 체인으로 전환됨 — stale 오류 모두 제거
       setAuthError(null);
       clearTripsError();
       // 세션 토큰이 있으면 trips 재요청 (토큰 없으면 로그인 CTA 표시)
@@ -297,20 +287,29 @@ export default function App() {
   // ─── 지갑 서명 로그인 ─────────────────────────────────────────────────
   const handleWalletLogin = useCallback(async () => {
     if (!address) return;
+    const loginAddress = address.toLowerCase();
+    // 서명/검증 도중 지갑이 해제되거나 다른 계정으로 바뀌면 결과를 버립니다 (타 계정 토큰 저장 금지)
+    const walletUnchanged = () =>
+      walletRef.current.status === "connected" &&
+      walletRef.current.address?.toLowerCase() === loginAddress;
     setAuthLoading(true);
     setAuthError(null);
     try {
       const nonce = await fetchNonce(address);
+      if (!walletUnchanged()) return;
       const signature = await signMessageAsync({ message: nonce });
-      // verifySignature가 saveToken()을 호출해 sessionStorage에 토큰 저장 후 토큰을 반환
+      if (!walletUnchanged()) return;
+      // verifySignature 는 토큰 subject 가 현재 활성 지갑과 같을 때만 저장하고 토큰을 반환
       const newToken = await verifySignature(address, nonce, signature);
-      // 진단: verify 성공 직후 localStorage 토큰 존재 여부만 기록 (값 미기록)
-      console.log("[auth] verify success tokenSavedToStorage=" + (!!newToken && !!localStorage.getItem("moaarc_auth_token")));
-      // refreshAuth: React state 업데이트 (비동기 — 이 줄 이후 isAuthenticated는 아직 false일 수 있음)
+      if (!walletUnchanged()) {
+        clearTokenIfEquals(newToken);
+        return;
+      }
       refreshAuth();
-      // 발급된 토큰을 reloadTrips에 직접 전달 — sessionStorage/state 타이밍 의존성 완전 제거
+      // 발급된 토큰을 reloadTrips에 직접 전달 — 저장소/state 타이밍 의존성 제거
       await reloadTrips(newToken);
     } catch (e) {
+      if (!walletUnchanged()) return;
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("User rejected") || msg.includes("user rejected")) {
         setAuthError("Signature cancelled.");
@@ -322,14 +321,28 @@ export default function App() {
     }
   }, [address, signMessageAsync, refreshAuth, reloadTrips]);
 
+  // ─── 참여자별 온체인 잔액 (공개 읽기 — 지갑 연결 불필요) ────────────────
+  const participantBalances = useParticipantBalances(
+    trip?.onchainTripId ?? 0n,
+    trip?.participants.map((p) => p.address) ?? [],
+    !!trip,
+    trip?.contractAddress,
+  );
+
   // ─── 파생 상태 ─────────────────────────────────────────────────────────
   const connectedParticipant = isConnected && address && trip
     ? trip.participants.find((p) => p.address.toLowerCase() === address.toLowerCase())
     : undefined;
 
   const currentUserId: ParticipantId = connectedParticipant?.id ?? "A";
-  const currentParticipant = trip?.participants.find((p) => p.id === currentUserId) ?? null;
-  const summary = trip ? calcParticipantSummary(trip, currentUserId) : null;
+  // 금액 표시용 trip: 참여자별 depositedAmount/allocatedBudget/spentFromBudget 를 온체인에서 읽은 값으로 채운 파생 뷰.
+  // 읽기 전/실패 시에는 participant.onchainStatus 가 "ok"가 아니며 UI 가 0 대신 상태 문구를 표시합니다.
+  const tripView = useMemo(
+    () => (trip ? applyOnchainBalances(trip, participantBalances.rows, participantBalances.status) : null),
+    [trip, participantBalances.rows, participantBalances.status],
+  );
+  const currentParticipant = tripView?.participants.find((p) => p.id === currentUserId) ?? null;
+  const summary = tripView ? calcParticipantSummary(tripView, currentUserId) : null;
   const isWrongChain = isConnected && chainId !== NETWORK_CONFIG.chainId;
   const isParticipant = isConnected && !!connectedParticipant;
   const isNonParticipant = isConnected && !connectedParticipant && !!trip;
@@ -339,6 +352,11 @@ export default function App() {
     <div className="min-h-dvh" style={{ background: "#F7F6F2" }}>
       {/* 헤더 */}
       <header className="bg-white border-b border-stone-200 sticky top-0 z-30">
+        {NETWORK_CONFIG.isMainnet && (
+          <div role="alert" className="bg-amber-500 px-4 py-1 text-center text-xs font-semibold text-white">
+            {t("mainnet_banner")}
+          </div>
+        )}
         <div className="max-w-4xl mx-auto px-4 py-3">
           <div className="flex items-center justify-between mb-2">
             <div>
@@ -386,13 +404,13 @@ export default function App() {
           {isWrongChain && (
             <div className="mb-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-xs text-rose-700">
               <div className="flex items-center justify-between gap-2">
-                <span>⚠️ {t("wrong_chain")} (current: {chainId})</span>
+                <span>⚠️ {t("wrong_chain", { network: NETWORK_LABEL })} (current: {chainId})</span>
                 <button
                   onClick={() => switchChain({ chainId: NETWORK_CONFIG.chainId })}
                   disabled={isSwitchingChain}
                   className="shrink-0 px-2 py-1 rounded-full bg-rose-600 text-white font-semibold hover:bg-rose-700 disabled:opacity-50"
                 >
-                  {isSwitchingChain ? t("status_loading") : t("switch_to_arc")}
+                  {isSwitchingChain ? t("status_loading") : t("switch_to_arc", { network: NETWORK_LABEL })}
                 </button>
               </div>
               {switchChainError && (
@@ -463,8 +481,8 @@ export default function App() {
               <span>{authError || tripsError}</span>
               <button
                 onClick={() => {
-                  clearToken();
-                  refreshAuth();
+                  // 이 브라우저의 앱 토큰만 삭제하고 다시 서명 로그인 (서버 데이터·지갑 연결은 건드리지 않음)
+                  session.resetSession();
                   clearTripsError();
                   setAuthError(null);
                   void handleWalletLogin();
@@ -527,8 +545,14 @@ export default function App() {
 
           {/* Arc Testnet badge */}
           <div className="flex items-center gap-2">
-            <span className="px-3 py-1 rounded-full text-xs font-semibold border bg-emerald-100 text-emerald-800 border-emerald-300">
-              🔗 Arc Testnet (5042002)
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-semibold border ${
+                NETWORK_CONFIG.isMainnet
+                  ? "bg-amber-100 text-amber-900 border-amber-300"
+                  : "bg-emerald-100 text-emerald-800 border-emerald-300"
+              }`}
+            >
+              🔗 {NETWORK_LABEL}
             </span>
             <span className="text-xs text-stone-500">
               {t("sign_in_desc")}
@@ -537,12 +561,13 @@ export default function App() {
         </div>
       </header>
 
-      {/* 상단 요약 바 */}
-      {currentParticipant && summary && (
+      {/* 상단 요약 바 — 인증된 세션에서만 */}
+      {isAuthenticated && currentParticipant && summary && (
         <TopSummaryBar participant={currentParticipant} summary={summary} />
       )}
 
-      {/* 탭 네비게이션 */}
+      {/* 탭 네비게이션 — 인증된 세션에서만 (비공개 화면으로 가는 메뉴) */}
+      {isAuthenticated && (
       <div className="bg-white border-b border-stone-200 sticky top-[140px] z-20">
         <div className="max-w-4xl mx-auto px-4">
           <div className="flex overflow-x-auto">
@@ -573,9 +598,10 @@ export default function App() {
           </div>
         </div>
       </div>
+      )}
 
-      {/* 탭 콘텐츠 */}
-      <main className="max-w-4xl mx-auto px-4 py-4 pb-12">
+      {/* 탭 콘텐츠 — key 가 바뀌면(계정 전환/로그아웃) 하위 컴포넌트의 로컬 상태(폼·훅 상태)까지 모두 폐기 */}
+      <main key={scope.key} className="max-w-4xl mx-auto px-4 py-4 pb-12">
 
         {/* 서버 오프라인 */}
         {!serverChecking && !serverOnline && (
@@ -593,19 +619,26 @@ export default function App() {
           <div className="bg-rose-50 border border-rose-200 rounded-xl p-8 text-center mt-4">
             <p className="text-3xl mb-3">🔗</p>
             <h2 className="text-base font-semibold text-rose-700 mb-2">
-              {t("switch_to_arc")}
+              {t("switch_to_arc", { network: NETWORK_LABEL })}
             </h2>
             <p className="text-sm text-rose-600 mb-1">
-              Current chain: <strong>{chainId}</strong> · Required: <strong>5042002</strong>
+              Current chain: <strong>{chainId}</strong> · Required: <strong>{NETWORK_CONFIG.chainId}</strong>
             </p>
             <p className="text-xs text-rose-500">
-              Switch to Arc Testnet manually in your wallet.
+              Switch to {NETWORK_LABEL} manually in your wallet.
             </p>
           </div>
         )}
 
+        {/* ── Wallet reconnecting (새로고침·재연결 중: 비공개 화면은 숨기고 토큰은 유지) ── */}
+        {session.isPending && (
+          <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4" role="status">
+            <p className="text-sm text-stone-500">{t("wallet_reconnecting")}</p>
+          </div>
+        )}
+
         {/* ── Wallet not connected ── */}
-        {!isConnected && serverOnline && (
+        {!isConnected && !session.isPending && serverOnline && (
           <div className="bg-white rounded-xl border border-stone-200 p-8 text-center mt-4">
             <p className="text-3xl mb-3">👛</p>
             <h2 className="text-base font-semibold text-stone-700 mb-2">{t("connect_wallet")}</h2>
@@ -718,22 +751,23 @@ export default function App() {
         )}
 
         {/* 탭 콘텐츠 — trip이 있을 때 */}
-        {trip && activeTab === "dashboard" && (
+        {tripView && activeTab === "dashboard" && (
           <DashboardTab
-            trip={trip}
+            trip={tripView}
             dbTripId={selectedDbTripId ?? ""}
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
             onParticipantAdded={() => { void reloadTrips(); }}
+            onOnchainBalancesChanged={participantBalances.refetch}
             connectedAddress={address}
             isWrongChain={isWrongChain}
           />
         )}
-        {trip && activeTab === "my" && (
+        {tripView && activeTab === "my" && (
           <MyExpensesTab
-            trip={trip}
+            trip={tripView}
             currentUserId={currentUserId}
-            onchainTripId={trip.onchainTripId}
+            onchainTripId={tripView.onchainTripId}
             connectedAddress={address}
           />
         )}
@@ -748,16 +782,16 @@ export default function App() {
             onTripSelect={setSelectedDbTripId}
           />
         )}
-        {trip && activeTab === "settlement" && (
+        {tripView && activeTab === "settlement" && (
           <SettlementTab
-            trip={trip}
+            trip={tripView}
             currentUserId={currentUserId}
             onTripUpdate={setTrip}
             connectedAddress={address}
             isWrongChain={isWrongChain}
           />
         )}
-        {activeTab === "itinerary" && (
+        {isAuthenticated && activeTab === "itinerary" && (
           <ItineraryTab
             trip={trip}
             currentUserId={currentUserId}
@@ -771,8 +805,9 @@ export default function App() {
       </main>
 
       {/* 여행방 추가 모달 */}
-      {showCreateModal && (
+      {isAuthenticated && showCreateModal && (
         <CreateTripModal
+          key={scope.key}
           onClose={() => setShowCreateModal(false)}
           onCreated={(newTrip: import("./apiClient").TripApiRecord) => {
             void reloadTrips();
@@ -808,7 +843,7 @@ export default function App() {
           <p className="text-amber-500 font-medium">
             ⚠ Push notifications not implemented — in-app notifications only.
           </p>
-          <p>{t("footer_disclaimer")}</p>
+          <p>{NETWORK_CONFIG.isMainnet ? t("footer_disclaimer_mainnet") : t("footer_disclaimer")}</p>
         </div>
       </footer>
     </div>
