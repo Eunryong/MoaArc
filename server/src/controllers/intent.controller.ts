@@ -28,15 +28,10 @@ import {
   verifyCreateTripTx,
   fetchOnchainParticipants,
   ACTIVE_CHAIN_ID,
+  getMoarcContract,
 } from "../lib/chain.js";
 import * as intentRepo from "../repositories/intent.repository.js";
 import * as tripRepo from "../repositories/trip.repository.js";
-
-function getMoarcContract(): string {
-  const addr = process.env.MOARC_CONTRACT_ADDRESS;
-  if (!addr) throw new Error("MOARC_CONTRACT_ADDRESS 환경변수가 없습니다.");
-  return addr.toLowerCase();
-}
 
 // ─── 1. intent 준비 ───────────────────────────────────────────────────────────
 
@@ -63,11 +58,12 @@ export async function prepareCreateTripIntent(c: Context) {
     if (!ADDR_RE.test(addr)) return c.json({ error: `유효하지 않은 주소: ${addr}` }, 400);
   }
 
-  let budget: bigint;
-  try { budget = BigInt(targetBudget); } catch {
-    return c.json({ error: "targetBudget은 정수 문자열이어야 합니다." }, 400);
+  // 마이크로USDC 10진 정수 문자열만 허용 (BigInt() 는 "0x10"·공백·빈 문자열도 받아 주므로 정규식으로 먼저 거름)
+  if (typeof targetBudget !== "string" || !/^\d+$/.test(targetBudget)) {
+    return c.json({ error: "targetBudget은 0 이상의 정수 문자열(마이크로USDC)이어야 합니다." }, 400);
   }
-  if (budget < 0n) return c.json({ error: "targetBudget은 0 이상이어야 합니다." }, 400);
+  const budget = BigInt(targetBudget);
+  if (budget > (1n << 256n) - 1n) return c.json({ error: "targetBudget이 너무 큽니다." }, 400);
 
   const contractAddress = getMoarcContract();
   const chainId = ACTIVE_CHAIN_ID;

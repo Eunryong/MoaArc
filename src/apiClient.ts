@@ -10,37 +10,84 @@
  *   3. POST /api/auth/verify { address, nonce, signature } → { token }
  *   4. 이후 모든 요청 헤더: Authorization: Bearer <token>
  *
- * 토큰은 sessionStorage에 보관합니다 (탭 닫으면 만료).
+ * 토큰은 localStorage 의 앱 전용 키 하나에 보관하며, 연결된 지갑 주소와 subject 가 일치할 때만 사용합니다.
+ * (서버 JWT 는 stateless 이므로 클라이언트 로그아웃은 서버 측 폐기가 아닙니다.)
  */
 
 // 상대경로 "" 사용 → Vite proxy(/api → localhost:3001)로 전달
 // 절대 주소(http://localhost:3001)를 쓰지 말 것 — Arc Studio 프리뷰에서 브라우저가 도달 불가
 // 배포 시: VITE_API_BASE_URL에 외부 서버 주소 설정
+import { TOKEN_KEY, isTokenForAddress, normalizeAddress } from "./session";
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
-const TOKEN_KEY = "moaarc_auth_token";
 
 
 // ─── 토큰 관리 ────────────────────────────────────────────────────────────────
-// 토큰은 localStorage에만 보관합니다.
+// 토큰은 localStorage 의 앱 전용 키(moaarc_auth_token) 하나에만 보관합니다.
 // Authorization: Bearer 헤더로만 전송하며, 쿠키/URL 경로는 사용하지 않습니다.
+//
+// "활성 신원(active identity)" 바인딩:
+//   앱(useWalletSession)이 현재 연결된 지갑 주소를 setActiveIdentity 로 알려 줍니다.
+//   getToken() 은 저장된 토큰의 subject 가 활성 신원과 같을 때만 토큰을 돌려줍니다.
+//   따라서 다른 지갑의 토큰은 저장소에 남아 있어도 요청에 실리지 않습니다.
+//   (이 검사는 UX/오조작 방지용이며, 실제 인증은 서버의 JWT 서명 검증입니다.)
 
-export function saveToken(token: string) {
-  localStorage.setItem(TOKEN_KEY, token);
+let activeIdentity: string | null = null;
+
+/** 현재 연결된 지갑 주소(없으면 null). 변경 시 호출자는 in-flight 응답 무효화를 별도로 처리해야 합니다. */
+export function setActiveIdentity(address: string | null | undefined) {
+  activeIdentity = normalizeAddress(address);
 }
 
-export function getToken(): string | null {
+export function getActiveIdentity(): string | null {
+  return activeIdentity;
+}
+
+/** 저장된 원본 토큰 (subject 검증 없음 — 세션 컨트롤러 전용) */
+export function getStoredTokenRaw(): string | null {
   return localStorage.getItem(TOKEN_KEY);
+}
+
+function tokenMatchesActiveIdentity(token: string): boolean {
+  return isTokenForAddress(token, activeIdentity, Date.now());
+}
+
+/**
+ * 토큰 저장. 토큰 subject 가 활성 신원과 같을 때만 저장합니다
+ * (서명 중 지갑 계정이 바뀌었거나 다른 주소의 토큰이면 저장하지 않고 false).
+ */
+export function saveToken(token: string): boolean {
+  if (!tokenMatchesActiveIdentity(token)) return false;
+  localStorage.setItem(TOKEN_KEY, token);
+  return true;
+}
+
+/** 활성 신원에 속한 유효 토큰만 반환 */
+export function getToken(): string | null {
+  const raw = localStorage.getItem(TOKEN_KEY);
+  if (!raw) return null;
+  return tokenMatchesActiveIdentity(raw) ? raw : null;
 }
 
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+/** 저장된 토큰이 usedToken 과 같을 때만 삭제 — 오래된 요청의 401 이 새 로그인 토큰을 지우지 못하게 */
+export function clearTokenIfEquals(usedToken: string | null | undefined) {
+  if (usedToken && localStorage.getItem(TOKEN_KEY) === usedToken) {
+    localStorage.removeItem(TOKEN_KEY);
+  }
+}
+
 // ─── 기본 fetch 래퍼 ────────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: string): Promise<T> {
-  // explicitToken이 있으면 우선 사용 — 로그인 직후 React state 반영 전 stale closure 방지
-  const token = explicitToken ?? getToken();
+  // explicitToken이 있으면 우선 사용 — 로그인 직후 React state 반영 전 stale closure 방지.
+  // 단, explicitToken 도 활성 신원과 subject 가 일치해야 전송한다 (다른 지갑 토큰 사용 금지).
+  const token = explicitToken !== undefined
+    ? (tokenMatchesActiveIdentity(explicitToken) ? explicitToken : null)
+    : getToken();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -108,7 +155,8 @@ async function apiFetch<T>(path: string, init?: RequestInit, explicitToken?: str
     //   → clearToken: 이 토큰은 더 이상 사용 불가
     const isMissingHeader = serverMsg.includes("인증이 필요합니다");
     if (!isMissingHeader) {
-      clearToken();
+      // 이 요청에 쓴 토큰이 아직 저장돼 있을 때만 삭제 (그 사이 다른 계정으로 로그인했다면 보존)
+      clearTokenIfEquals(token);
     }
     throw new ApiError(401, serverMsg || "인증이 필요합니다. 다시 로그인해주세요.");
   }
@@ -187,7 +235,10 @@ export async function verifySignature(
     method: "POST",
     body: JSON.stringify({ address, nonce, signature }),
   });
-  saveToken(data.token);
+  // 서명 도중 지갑 계정이 바뀌었거나 다른 주소의 토큰이면 저장하지 않음 (타 계정 토큰 부활 방지)
+  if (!saveToken(data.token)) {
+    throw new Error("지갑 계정이 변경되어 로그인을 취소했습니다. 다시 시도하세요.");
+  }
   return data.token;
 }
 

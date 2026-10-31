@@ -15,7 +15,7 @@ import {
   getExpenses,
   getNotifications,
   getToken,
-  clearToken,
+  clearTokenIfEquals,
   ApiError,
   type TripApiRecord,
   type ItineraryApiItem,
@@ -25,6 +25,37 @@ import {
   type NetworkStatus,
 } from "./apiClient";
 import { NETWORK_CONFIG } from "./networkConfig";
+import { backendNetworkMismatch } from "./networkConfigCore";
+import type { ScopeGuard } from "./session";
+
+/**
+ * 신원(세션) 범위. key 가 바뀌면 훅이 보유한 데이터를 즉시 비우고,
+ * guard 티켓이 무효화되면 이전 세션에서 시작된 응답은 버려집니다.
+ */
+export interface DataScope {
+  key: string;
+  guard: ScopeGuard;
+}
+
+/**
+ * 요청 시작 시 begin() 으로 "stale 여부 판별 함수"를 받고, 응답 후 isStale() 이 true 면 결과를 버립니다.
+ * - scope 의 guard 티켓: 계정 전환 / 로그아웃 / 토큰 만료
+ * - resetKey 변경: 같은 세션 안에서 대상(여행방)이 바뀐 경우
+ */
+function useStaleGuard(scope: DataScope | undefined, resetKey: string) {
+  const localRef = useRef(0);
+  const guard = scope?.guard;
+  const scopeKey = scope?.key;
+  // 반드시 load 효과보다 먼저 선언 — 대상/세션이 바뀌면 이전 요청을 먼저 무효화
+  useEffect(() => { localRef.current += 1; }, [resetKey, scopeKey]);
+  return useCallback(() => {
+    const local = localRef.current;
+    const ticket = guard?.ticket();
+    return () =>
+      localRef.current !== local ||
+      (guard !== undefined && ticket !== undefined && !guard.isCurrent(ticket));
+  }, [guard]);
+}
 
 // ─── 서버 헬스 체크 ──────────────────────────────────────────────────────────
 
@@ -140,6 +171,13 @@ export function useNetworkMatch(serverOnline: boolean): NetworkMatchState {
         return;
       }
 
+      // network 이름("mainnet"/"testnet"), USDC 주소, VERSION 까지 모두 일치해야 ready
+      const mismatch = backendNetworkMismatch(ns, NETWORK_CONFIG);
+      if (mismatch !== null) {
+        setState({ checked: true, networkReady: false, errors: [`network_mismatch:${mismatch}`], raw: ns });
+        return;
+      }
+
       setState({ checked: true, networkReady: true, errors: [], raw: ns });
     }
 
@@ -154,69 +192,64 @@ export function useNetworkMatch(serverOnline: boolean): NetworkMatchState {
   return state;
 }
 
-// ─── 인증 상태 ────────────────────────────────────────────────────────────────
-
-export function useAuthState(_connectedAddress?: string) {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => !!getToken());
-  const [isExpired, setIsExpired] = useState(false);
-
-  const refresh = useCallback(() => {
-    setIsAuthenticated(!!getToken());
-    setIsExpired(false);
-  }, []);
-
-  const markExpired = useCallback(() => {
-    clearToken();
-    setIsAuthenticated(false);
-    setIsExpired(true);
-  }, []);
-
-  return { isAuthenticated, isExpired, refresh, markExpired };
-}
-
 // ─── 내 여행방 목록 ───────────────────────────────────────────────────────────
 
-export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
+export function useMyTrips(enabled: boolean, onAuthExpired?: (usedToken?: string) => void, scope?: DataScope) {
   const [trips, setTrips] = useState<TripApiRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadedOnce, setLoadedOnce] = useState(false);
 
   const skipNextAutoRef = useRef(false);
+  const scopeKey = scope?.key ?? "";
+  const beginRequest = useStaleGuard(scope, "trips");
+
+  // 세션/계정이 바뀌면 이전 계정의 목록·오류·로딩 상태를 즉시 폐기 (load 효과보다 먼저 선언)
+  useEffect(() => {
+    setTrips([]);
+    setLoadedOnce(false);
+    setError(null);
+    setLoading(false);
+    skipNextAutoRef.current = false;
+  }, [scopeKey]);
 
   const load = useCallback(async (explicitToken?: string) => {
     if (!explicitToken && skipNextAutoRef.current) {
       skipNextAutoRef.current = false;
       return;
     }
-    if (!explicitToken && !getToken()) return;
+    const usedToken = explicitToken ?? getToken();
+    if (!usedToken) return;
+    const isStale = beginRequest();
     setLoading(true);
     setError(null);
     try {
       const data = explicitToken
         ? await listMyTripsWithToken(explicitToken)
         : await listMyTrips();
+      if (isStale()) return; // 계정 전환/로그아웃 이후 도착한 응답은 버림
       setTrips(data);
       setLoadedOnce(true);
     } catch (e) {
+      if (isStale()) return;
       if (e instanceof ApiError && e.status === 401) {
-        clearToken();
-        onAuthExpired?.();
+        clearTokenIfEquals(usedToken);
+        onAuthExpired?.(usedToken);
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
-  }, [onAuthExpired]);
+  }, [onAuthExpired, beginRequest]);
 
-  useEffect(() => { if (enabled) void load(); }, [enabled, load]);
+  useEffect(() => { if (enabled) void load(); }, [enabled, load, scopeKey]);
 
   useEffect(() => {
     if (!enabled) return;
     const id = setInterval(() => { void load(); }, 30_000);
     return () => clearInterval(id);
-  }, [enabled, load]);
+  }, [enabled, load, scopeKey]);
 
   const reload = useCallback((explicitToken?: string) => {
     if (explicitToken) skipNextAutoRef.current = true;
@@ -229,76 +262,120 @@ export function useMyTrips(enabled: boolean, onAuthExpired?: () => void) {
     if (!enabled) setError(null);
   }, [enabled]);
 
-  return { trips, loading, error, loadedOnce, reload, clearError };
+  // enabled=false(로그아웃/미인증)이면 캐시된 목록을 아예 노출하지 않음
+  return {
+    trips: enabled ? trips : [],
+    loading: enabled ? loading : false,
+    error: enabled ? error : null,
+    loadedOnce: enabled ? loadedOnce : false,
+    reload,
+    clearError,
+  };
 }
 
 // ─── 여행방 일정 ─────────────────────────────────────────────────────────────
 
-export function useTripItinerary(dbTripId: string | null, enabled: boolean) {
+export function useTripItinerary(dbTripId: string | null, enabled: boolean, scope?: DataScope) {
   const [items, setItems] = useState<ItineraryApiItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const scopeKey = scope?.key ?? "";
+  const beginRequest = useStaleGuard(scope, dbTripId ?? "");
+
+  // 다른 여행방/다른 계정으로 바뀌면 이전 항목을 즉시 비움
+  useEffect(() => {
+    setItems([]);
+    setError(null);
+    setLoading(false);
+  }, [dbTripId, scopeKey]);
 
   const load = useCallback(async () => {
     if (!enabled || !dbTripId || !getToken()) return;
+    const isStale = beginRequest();
     setLoading(true);
     setError(null);
     try {
       const data = await getItinerary(dbTripId);
+      if (isStale()) return;
       setItems(data);
     } catch (e) {
+      if (isStale()) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
-  }, [enabled, dbTripId]);
+  }, [enabled, dbTripId, beginRequest]);
 
-  useEffect(() => { void load(); }, [load]);
-  return { items, loading, error, reload: load };
+  useEffect(() => { void load(); }, [load, scopeKey]);
+  return { items: enabled ? items : [], loading, error, reload: load };
 }
 
 // ─── 지출 목록 ────────────────────────────────────────────────────────────────
 
-export function useTripExpenses(dbTripId: string | null, enabled: boolean) {
+export function useTripExpenses(dbTripId: string | null, enabled: boolean, scope?: DataScope) {
   const [expenses, setExpenses] = useState<ExpenseApiRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const scopeKey = scope?.key ?? "";
+  const beginRequest = useStaleGuard(scope, dbTripId ?? "");
+
+  useEffect(() => {
+    setExpenses([]);
+    setError(null);
+    setLoading(false);
+  }, [dbTripId, scopeKey]);
 
   const load = useCallback(async () => {
     if (!enabled || !dbTripId || !getToken()) return;
+    const isStale = beginRequest();
     setLoading(true);
     setError(null);
     try {
       const data = await getExpenses(dbTripId);
+      if (isStale()) return;
       setExpenses(data);
     } catch (e) {
+      if (isStale()) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
-  }, [enabled, dbTripId]);
+  }, [enabled, dbTripId, beginRequest]);
 
-  useEffect(() => { void load(); }, [load]);
-  return { expenses, loading, error, reload: load };
+  useEffect(() => { void load(); }, [load, scopeKey]);
+  return { expenses: enabled ? expenses : [], loading, error, reload: load };
 }
 
 // ─── 알림 ────────────────────────────────────────────────────────────────────
 
-export function useTripNotifications(dbTripId: string | null, enabled: boolean) {
+export function useTripNotifications(dbTripId: string | null, enabled: boolean, scope?: DataScope) {
   const [notifications, setNotifications] = useState<NotificationApiRecord[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const scopeKey = scope?.key ?? "";
+  const beginRequest = useStaleGuard(scope, dbTripId ?? "");
+
+  useEffect(() => {
+    setNotifications([]);
+    setUnreadCount(0);
+  }, [dbTripId, scopeKey]);
 
   const load = useCallback(async () => {
     if (!enabled || !dbTripId || !getToken()) return;
+    const isStale = beginRequest();
     try {
       const data = await getNotifications(dbTripId);
+      if (isStale()) return;
       setNotifications(data);
       setUnreadCount(data.filter((n) => !n.read).length);
     } catch {
       // 알림 로드 실패는 조용히 처리
     }
-  }, [enabled, dbTripId]);
+  }, [enabled, dbTripId, beginRequest]);
 
-  useEffect(() => { void load(); }, [load]);
-  return { notifications, unreadCount, reload: load };
+  useEffect(() => { void load(); }, [load, scopeKey]);
+  return {
+    notifications: enabled ? notifications : [],
+    unreadCount: enabled ? unreadCount : 0,
+    reload: load,
+  };
 }

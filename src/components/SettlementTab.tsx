@@ -6,9 +6,11 @@ import {
   getPendingExpenseCount,
   getContractBalance,
   fmtUsdc,
-  parseUsdcInput,
-  toDisplayNumber,
+  parsePositiveUsdc,
+  usdcInputProblem,
+  formatUsdcExact,
 } from "../calculations";
+import { statusLabelKey } from "../onchainReads";
 function createEmptySettlement(): FinalSettlement {
   return {
     ledgerHash: "",
@@ -81,6 +83,11 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
   const balanceMatches = contractBalance === totalRefunds;
 
   function proposeSettlement() {
+    // 온체인 잔액을 못 읽은 참여자가 있으면 netBalance 가 가짜 값이므로 정산안을 만들지 않음
+    if (summaries.some(({ summary }) => summary.balancesStatus !== "ok")) {
+      setSettleMsg(t("balances_not_ready"));
+      return;
+    }
     if (pendingCount > 0) {
       setSettleMsg(t("pending_expenses_warning"));
       return;
@@ -122,8 +129,12 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
 
   function payDeficit(pid: ParticipantId) {
     if (!settlement) return;
-    const amt = parseUsdcInput(deficitInput[pid] ?? "");
-    if (!amt || amt <= 0n) return;
+    const parsed = parsePositiveUsdc(deficitInput[pid] ?? "");
+    if (!parsed.ok) {
+      setClaimMsg({ ...claimMsg, [pid]: t(parsed.key) });
+      return;
+    }
+    const amt = parsed.value;
     const required = settlement.requiredDeficits[pid] ?? 0n;
     const alreadyPaid = trip.participants.find((p) => p.id === pid)?.paidDeficit ?? 0n;
     if (alreadyPaid + amt > required) {
@@ -204,7 +215,9 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
                       {isMe && <span className="ml-1 text-xs text-indigo-600">({t("me")})</span>}
                     </td>
                     <td className="py-2.5 text-right tabular-nums text-stone-700">
-                      {fmtUsdc(summary.depositedAmount)}
+                      {summary.balancesStatus === "ok"
+                        ? fmtUsdc(summary.depositedAmount)
+                        : <span className="text-stone-400">{t(statusLabelKey(summary.balancesStatus))}</span>}
                     </td>
                     <td className="py-2.5 text-right tabular-nums text-stone-700">
                       {fmtUsdc(summary.confirmedBurden)}
@@ -215,7 +228,9 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
                       )}
                     </td>
                     <td className="py-2.5 text-right tabular-nums">
-                      {summary.allocatedBudget > 0n ? (
+                      {summary.balancesStatus !== "ok" ? (
+                        <span className="text-stone-400">{t(statusLabelKey(summary.balancesStatus))}</span>
+                      ) : summary.allocatedBudget > 0n ? (
                         <span className="text-amber-600 font-medium">
                           {fmtUsdc(summary.allocatedBudget)}
                         </span>
@@ -224,7 +239,9 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
                       )}
                     </td>
                     <td className="py-2.5 text-right tabular-nums font-semibold">
-                      {summary.netBalance >= 0n ? (
+                      {summary.balancesStatus !== "ok" ? (
+                        <span className="text-stone-400 font-normal">{t(statusLabelKey(summary.balancesStatus))}</span>
+                      ) : summary.netBalance >= 0n ? (
                         <span className="text-emerald-700">+{fmtUsdc(summary.netBalance)}</span>
                       ) : (
                         <span className="text-rose-600">-{fmtUsdc(-summary.netBalance)}</span>
@@ -240,12 +257,12 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
       </div>
 
       {/* 외부 결제 잔액 회수 알림 */}
-      {summaries.some(({ summary }) => summary.allocatedBudget > 0n) && (
+      {summaries.some(({ summary }) => summary.balancesStatus === "ok" && summary.allocatedBudget > 0n) && (
         <div className="bg-amber-50 rounded-xl border border-amber-200 p-4">
           <h3 className="text-sm font-semibold text-amber-800 mb-2">{t("external_budget_return_title")}</h3>
           <div className="space-y-1">
             {summaries
-              .filter(({ summary }) => summary.allocatedBudget > 0n)
+              .filter(({ summary }) => summary.balancesStatus === "ok" && summary.allocatedBudget > 0n)
               .map(({ participant, summary }) => (
                 <p key={participant.id} className="text-sm text-amber-700">
                   {participant.name}: {fmtUsdc(summary.allocatedBudget)} USDC {t("return_required")}
@@ -332,10 +349,11 @@ export default function SettlementTab({ trip, currentUserId, onTripUpdate, isWro
               </p>
               <div className="flex gap-2">
                 <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  max={toDisplayNumber(myDeficitRemaining)}
+                  type="text"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  data-max={formatUsdcExact(myDeficitRemaining)}
+                  aria-invalid={!!usdcInputProblem(deficitInput[currentUserId] ?? "")}
                   disabled={!ONCHAIN_SETTLEMENT_ENABLED}
                   className="flex-1 border border-stone-200 rounded-lg px-3 py-2 text-sm bg-stone-100 text-stone-400 cursor-not-allowed"
                   placeholder={`max ${fmtUsdc(myDeficitRemaining)} USDC`}

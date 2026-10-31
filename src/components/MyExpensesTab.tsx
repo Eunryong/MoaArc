@@ -9,6 +9,7 @@ import {
   isExpenseConfirmed,
 } from "../calculations";
 import { useDepositedAmount } from "../useContractState";
+import { statusLabelKey } from "../onchainReads";
 
 interface Props {
   trip: Trip;
@@ -26,6 +27,9 @@ export default function MyExpensesTab({ trip, currentUserId, onchainTripId, conn
   const enabled = tripId > 0n && !!connectedAddress;
   const myDepositResult = useDepositedAmount(tripId, connectedAddress, enabled);
   const categoryBurden = getBurdenByCategory(trip, currentUserId);
+  // allocatedBudget / netBalance 는 온체인 읽기가 끝나야 의미가 있음 (그 전/실패 시 가짜 0 대신 상태 문구)
+  const balancesStatus = summary.balancesStatus;
+  const balancesStatusText = balancesStatus === "ok" ? null : t(statusLabelKey(balancesStatus));
 
   // 나와 관련된 대기 지출
   const pendingForMe = trip.expenses.filter(
@@ -62,19 +66,31 @@ export default function MyExpensesTab({ trip, currentUserId, onchainTripId, conn
                 : undefined
             }
           />
-          {summary.allocatedBudget > 0 && (
+          {balancesStatusText !== null ? (
             <SummaryRow
               label={t("external_wallet_budget")}
-              value={`${fmtUsdc(summary.allocatedBudget)} USDC`}
-              warn
+              value={balancesStatusText}
+              warn={balancesStatus === "error"}
             />
+          ) : (
+            summary.allocatedBudget > 0n && (
+              <SummaryRow
+                label={t("external_wallet_budget")}
+                value={`${fmtUsdc(summary.allocatedBudget)} USDC`}
+                warn
+              />
+            )
           )}
           <div className="border-t border-stone-100 pt-2 mt-2">
             <SummaryRow
-              label={summary.netBalance >= 0n ? t("surplus") : t("deficit")}
-              value={`${summary.netBalance >= 0n ? "+" : "-"}${fmtUsdc(summary.netBalance < 0n ? -summary.netBalance : summary.netBalance)} USDC`}
-              big
-              positive={summary.netBalance >= 0n}
+              label={balancesStatusText !== null ? `${t("surplus")} / ${t("deficit")}` : summary.netBalance >= 0n ? t("surplus") : t("deficit")}
+              value={
+                balancesStatusText !== null
+                  ? balancesStatusText
+                  : `${summary.netBalance >= 0n ? "+" : "-"}${fmtUsdc(summary.netBalance < 0n ? -summary.netBalance : summary.netBalance)} USDC`
+              }
+              big={balancesStatusText === null}
+              positive={balancesStatusText === null && summary.netBalance >= 0n}
             />
           </div>
         </div>

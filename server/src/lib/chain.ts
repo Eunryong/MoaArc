@@ -1,19 +1,19 @@
 /**
  * server/src/lib/chain.ts — 온체인 검증 유틸리티
  *
- * 환경변수:
- *   MOARC_CONTRACT_ADDRESS   배포된 MoaArcTreasury 주소 (0x...)  [필수]
- *   MOARC_CHAIN_ID           체인 ID 정수 문자열 (기본: 5042002 Arc Testnet)
- *   MOARC_USDC_ADDRESS       USDC ERC-20 주소 (기본: 테스트넷 주소)
- *   MOARC_NETWORK            "testnet" | "mainnet" (기본: "testnet")
- *   ARC_TESTNET_RPC_FALLBACK 공개 RPC URL
- *   ARC_RPC_URL              추가 RPC URL (우선순위 높음)
- *   RPC_PROXY_BASE_URL, RPC_PROXY_TOKEN, RPC_PROXY_CHAINS  Arc Studio RPC 프록시
+ * 환경변수 (검증 규칙은 networkEnv.ts — 잘못된 값은 모두 fail-closed):
+ *   MOARC_NETWORK            정확히 "testnet" | "mainnet" (대소문자·공백 불허). 미설정/공백뿐 = testnet, 그 외 값은 오류
+ *   MOARC_CHAIN_ID           10진 정수 문자열. mainnet 필수(5042), testnet 선택(5042002). 공식 id 와 정확히 일치해야 함
+ *   MOARC_CONTRACT_ADDRESS   배포된 MoaArcTreasury 주소 [필수]. mainnet 에서는 테스트넷 배포 주소 거부
+ *   MOARC_USDC_ADDRESS       USDC 주소. mainnet 필수 + 정확히 0x3600…0000. testnet 기본값 동일
+ *   MOARC_CONTRACT_VERSION   기대 VERSION() (mainnet 에서는 "MoaArc-3.0" 고정)
+ *   ARC_MAINNET_RPC_URL(_2,_3)  mainnet 전용 RPC (https). mainnet 에서는 이것만 사용 + viem 공식 mainnet 기본값
+ *   ARC_TESTNET_RPC_URL(_2,_3), ARC_RPC_URL(_2,_3), ARC_TESTNET_RPC_FALLBACK, RPC_PROXY_*  testnet 전용
  *
  * 규칙:
- *  - MOARC_NETWORK=mainnet 이면 mainnet chain 객체 사용.
- *  - mainnet 이면 Arc RPC 5042번 응답을 검증 (mismatch → write 차단).
- *  - 테스트넷 주소를 mainnet fallback 으로 절대 사용 금지.
+ *  - mainnet 에서는 테스트넷 RPC fallback / 범용 ARC_RPC_URL* / Arc Studio 프록시를 사용하지 않음.
+ *  - 설정 오류가 있으면 verifyServerNetworkConfig() 가 RPC 호출 없이 실패하고 write API 는 503.
+ *  - 시작 시 eth_chainId(설정값·공식값 모두 일치), bytecode, VERSION(), treasury.usdc(), USDC decimals 검증.
  */
 
 import {
@@ -26,69 +26,57 @@ import {
   decodeEventLog,
 } from "viem";
 import { arc, arcTestnet } from "viem/chains";
+import { resolveServerNetwork, buildRpcUrls } from "./networkEnv.js";
 
-// ─── 환경변수 파싱 ────────────────────────────────────────────────────────────
+// ─── 환경변수 파싱 (fail-closed) ──────────────────────────────────────────────
 
-const NETWORK = (process.env.MOARC_NETWORK ?? "testnet").toLowerCase();
-const IS_MAINNET = NETWORK === "mainnet";
+/** 모듈 로드 시점의 네트워크 해석. 이후 getMoarcContract/Usdc 는 env 를 다시 읽되 네트워크가 바뀌면 거부합니다. */
+const BOOT = resolveServerNetwork(process.env);
+
+/** 표시용 네트워크 이름 (알 수 없는 값이면 입력값 그대로 — 검증은 BOOT.errors 로 실패) */
+const NETWORK: string = BOOT.network ?? (process.env.MOARC_NETWORK ?? "");
 
 /** 지원 체인 ID */
 export const ARC_TESTNET_CHAIN_ID = arcTestnet.id;  // 5042002
 export const ARC_MAINNET_CHAIN_ID = arc.id;          // 5042
 
-export const ACTIVE_CHAIN_ID: number = IS_MAINNET
-  ? (process.env.MOARC_CHAIN_ID ? parseInt(process.env.MOARC_CHAIN_ID, 10) : ARC_MAINNET_CHAIN_ID)
-  : (process.env.MOARC_CHAIN_ID ? parseInt(process.env.MOARC_CHAIN_ID, 10) : ARC_TESTNET_CHAIN_ID);
+/**
+ * 검증된 체인 ID. 네트워크 이름이나 MOARC_CHAIN_ID 가 잘못되면 0 (어떤 체인 ID 와도 일치하지 않음 →
+ * chainId 비교 라우트가 모두 거부).
+ */
+export const ACTIVE_CHAIN_ID: number = BOOT.chainId ?? 0;
 
-const ACTIVE_CHAIN = IS_MAINNET ? arc : arcTestnet;
+const ACTIVE_CHAIN = BOOT.network === "mainnet" ? arc : BOOT.network === "testnet" ? arcTestnet : null;
 
-// 테스트넷 기본값 — mainnet이면 환경변수 필수
-const TESTNET_USDC = "0x3600000000000000000000000000000000000000" as const;
-
-function getMoarcContract(): `0x${string}` {
-  const addr = process.env.MOARC_CONTRACT_ADDRESS;
-  if (!addr) throw new Error("MOARC_CONTRACT_ADDRESS 환경변수가 설정되지 않았습니다.");
-  if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
-    throw new Error(`MOARC_CONTRACT_ADDRESS "${addr}" 은 유효한 주소가 아닙니다.`);
+function currentConfig() {
+  const r = resolveServerNetwork(process.env);
+  if (r.network !== BOOT.network) {
+    throw new Error("MOARC_NETWORK 가 서버 시작 후 변경되었습니다 — 재시작이 필요합니다.");
   }
-  return addr.toLowerCase() as `0x${string}`;
+  if (r.errors.length > 0) {
+    throw new Error(`네트워크 설정 오류: ${r.errors.join("; ")}`);
+  }
+  return r;
 }
 
-function getMoarcUsdc(): `0x${string}` {
-  const addr = process.env.MOARC_USDC_ADDRESS;
-  if (IS_MAINNET && !addr) {
-    throw new Error("MOARC_USDC_ADDRESS 환경변수가 mainnet에서 필수입니다.");
-  }
-  if (addr) {
-    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) {
-      throw new Error(`MOARC_USDC_ADDRESS "${addr}" 은 유효한 주소가 아닙니다.`);
-    }
-    return addr.toLowerCase() as `0x${string}`;
-  }
-  return TESTNET_USDC;
+/** 검증된 MoaArcTreasury 주소 (소문자). mainnet 에서는 테스트넷 배포 주소·0 주소·형식 오류를 거부합니다. */
+export function getMoarcContract(): `0x${string}` {
+  return currentConfig().contractAddress as `0x${string}`;
 }
 
 function getRpcUrls(): string[] {
-  const urls: string[] = [];
-  if (process.env.ARC_RPC_URL)              urls.push(process.env.ARC_RPC_URL);
-  if (process.env.ARC_RPC_URL_2)            urls.push(process.env.ARC_RPC_URL_2);
-  if (process.env.ARC_RPC_URL_3)            urls.push(process.env.ARC_RPC_URL_3);
-  if (process.env.ARC_TESTNET_RPC_FALLBACK) urls.push(process.env.ARC_TESTNET_RPC_FALLBACK);
-  const base  = process.env.RPC_PROXY_BASE_URL;
-  const token = process.env.RPC_PROXY_TOKEN;
-  const chains = process.env.RPC_PROXY_CHAINS ?? "";
-  const proxyKey = IS_MAINNET ? "ARC-MAINNET" : "ARC-TESTNET";
-  if (base && token && chains.includes(proxyKey)) {
-    urls.push(`${base}/api/rpc/${proxyKey.toLowerCase()}?_rpc_token=${token}`);
-  }
-  if (urls.length === 0) {
-    // viem chain defaults
-    ACTIVE_CHAIN.rpcUrls.default.http.forEach((u) => urls.push(u));
-  }
+  if (!ACTIVE_CHAIN) throw new Error("알 수 없는 MOARC_NETWORK — RPC 를 구성할 수 없습니다.");
+  const { urls, errors } = buildRpcUrls(
+    BOOT.network as "testnet" | "mainnet",
+    process.env,
+    ACTIVE_CHAIN.rpcUrls.default.http as readonly string[],
+  );
+  if (errors.length > 0) throw new Error(`RPC 설정 오류: ${errors.join("; ")}`);
   return urls;
 }
 
 function makeClient() {
+  if (!ACTIVE_CHAIN) throw new Error("알 수 없는 MOARC_NETWORK — RPC 클라이언트를 만들 수 없습니다.");
   const urls = getRpcUrls();
   const transports = urls.map((u) => http(u, { timeout: 30_000 }));
   return createPublicClient({
@@ -100,11 +88,10 @@ function makeClient() {
 // ─── 서버 시작 시 RPC 검증 ────────────────────────────────────────────────────
 
 /** 컨트랙트 VERSION() 함수가 반환해야 하는 정확한 문자열 */
-const EXPECTED_VERSION =
-  (process.env.MOARC_CONTRACT_VERSION ?? "MoaArc-3.0");
+const EXPECTED_VERSION = BOOT.contractVersion;
 
 /** 공식 체인 ID — ACTIVE_CHAIN_ID와 일치해야 함 */
-const OFFICIAL_CHAIN_ID = ACTIVE_CHAIN.id;
+const OFFICIAL_CHAIN_ID = ACTIVE_CHAIN?.id ?? 0;
 
 export interface ServerNetworkVerification {
   ok: boolean;
@@ -183,8 +170,13 @@ export async function verifyServerNetworkConfig(): Promise<ServerNetworkVerifica
   let usdc: `0x${string}`;
 
   try {
-    contract = getMoarcContract();
-    usdc     = getMoarcUsdc();
+    // 설정이 하나라도 잘못되면 RPC 를 호출하지 않고 실패 (write API 는 503 유지)
+    const cfg = currentConfig();
+    if (!ACTIVE_CHAIN) throw new Error("알 수 없는 MOARC_NETWORK");
+    contract = cfg.contractAddress as `0x${string}`;
+    usdc     = cfg.usdcAddress as `0x${string}`;
+    // RPC 목록도 사전 검증 (잘못된/교차 네트워크 URL 이면 여기서 실패)
+    getRpcUrls();
   } catch (e) {
     const msg = sanitizeError(e);
     errors.push(`설정 오류: ${msg}`);

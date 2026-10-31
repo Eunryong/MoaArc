@@ -14,7 +14,10 @@ import {
   isExpenseConfirmed,
   isExpensePending,
   parseUsdcInput,
-  toDisplayNumber,
+  parsePositiveUsdc,
+  parseOptionalUsdc,
+  usdcInputProblem,
+  formatUsdcExact,
 } from "../calculations";
 import { addExpense, approveExpense } from "../apiClient";
 import type { TripApiRecord } from "../apiClient";
@@ -276,6 +279,7 @@ function AddExpenseForm({
   const amountRef = useRef<HTMLInputElement>(null);
 
   const totalParsed = parseUsdcInput(amountStr);
+  const amountProblem = usdcInputProblem(amountStr);
 
   // 균등 분배 계산
   function computeShares(): ShareEntry[] {
@@ -289,10 +293,11 @@ function AddExpenseForm({
         amount: base + (i === 0 ? remainder : 0n),
       }));
     }
-    return pids.map((pid) => ({
-      participantId: pid,
-      amount: parseUsdcInput(customShares[pid] ?? "") ?? 0n,
-    }));
+    return pids.map((pid) => {
+      // 빈 칸 = 0. 잘못된 칸은 handleSubmit 에서 사전 거부되므로 여기서는 미리보기용으로 0 처리
+      const parsed = parseOptionalUsdc(customShares[pid] ?? "");
+      return { participantId: pid, amount: parsed.ok ? parsed.value : 0n };
+    });
   }
 
   function toggleParticipant(pid: ParticipantId) {
@@ -317,22 +322,36 @@ function AddExpenseForm({
       dateRef.current?.focus();
       return;
     }
-    if (!totalParsed || totalParsed <= 0n) {
-      setFieldErrors((prev) => ({ ...prev, amount: t("err_amount_required") }));
+    // 총액: 0~6자리 소수만 허용. 7자리 이상/지수 표기/음수는 서버 호출 전에 거부 (절사·반올림 없음)
+    const totalCheck = parsePositiveUsdc(amountStr);
+    if (!totalCheck.ok) {
+      setFieldErrors((prev) => ({ ...prev, amount: t(totalCheck.key) }));
       amountRef.current?.focus();
       return;
     }
+    const total = totalCheck.value;
     if (selectedParticipants.size === 0) {
       setFieldErrors((prev) => ({ ...prev, participants: t("err_no_participants") }));
       return;
     }
 
+    // 직접 입력 분담액: 잘못된 칸(7자리 이상 소수 등)을 0 으로 취급하지 않고 명시적으로 거부
+    if (!useEqualSplit) {
+      for (const pid of selectedParticipants) {
+        const problem = usdcInputProblem(customShares[pid] ?? "");
+        if (problem) {
+          setFieldErrors((prev) => ({ ...prev, split: t(problem) }));
+          return;
+        }
+      }
+    }
+
     const shares = computeShares();
     const sharesSum = shares.reduce((s, sh) => s + sh.amount, 0n);
-    if (sharesSum !== totalParsed) {
+    if (sharesSum !== total) {
       const msg = t("err_split_mismatch")
         .replace("{sum}", fmtUsdc(sharesSum))
-        .replace("{total}", fmtUsdc(totalParsed));
+        .replace("{total}", fmtUsdc(total));
       setFieldErrors((prev) => ({ ...prev, split: msg }));
       return;
     }
@@ -345,7 +364,7 @@ function AddExpenseForm({
         title: title.trim(),
         category,
         date,
-        totalUsdc: totalParsed.toString(),
+        totalUsdc: total.toString(),
         paymentFlow,
         receiptNote: receiptNote.trim() || undefined,
         shares: shares.map((s) => ({
@@ -419,14 +438,16 @@ function AddExpenseForm({
           <label className="text-xs font-medium text-stone-600 mb-1 block">{t("amount_usdc_label")} *</label>
           <input
             ref={amountRef}
-            type="number"
-            min="0"
-            step="0.01"
+            type="text"
+            inputMode="decimal"
+            autoComplete="off"
+            aria-invalid={!!amountProblem}
             className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 tabular-nums ${fieldErrors.amount ? "border-rose-400" : "border-stone-200"}`}
             placeholder="0.00"
             value={amountStr}
             onChange={(e) => { setAmountStr(e.target.value); setFieldErrors((prev) => ({ ...prev, amount: undefined })); }}
           />
+          {amountProblem && !fieldErrors.amount && <p className="mt-1 text-xs text-rose-600">{t(amountProblem)}</p>}
           {fieldErrors.amount && <p className="mt-1 text-xs text-rose-600">{fieldErrors.amount}</p>}
         </div>
 
@@ -478,10 +499,11 @@ function AddExpenseForm({
                 </label>
                 {!useEqualSplit && selectedParticipants.has(p.id) && (
                   <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    className="w-28 border border-stone-200 rounded-lg px-2 py-1 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    aria-invalid={!!usdcInputProblem(customShares[p.id] ?? "")}
+                    className={`w-28 border rounded-lg px-2 py-1 text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-indigo-300 ${usdcInputProblem(customShares[p.id] ?? "") ? "border-rose-400" : "border-stone-200"}`}
                     placeholder="0.00"
                     value={customShares[p.id] ?? ""}
                     onChange={(e) => setCustomShares((prev) => ({ ...prev, [p.id]: e.target.value }))}
@@ -573,10 +595,17 @@ function ExpenseDetail({
   const isSharesValid = validateShares(editShares, totalAmount);
   const diff = totalAmount - sharesSum;
 
+  // 입력 문자열을 그대로 보관 (number 입력/Number 변환으로 값이 바뀌지 않도록). 빈 칸 = 0, 잘못된 칸은 제출 차단.
+  const [shareInputs, setShareInputs] = useState<Record<string, string>>({});
+  const hasShareProblem = editShares.some(
+    (s) => usdcInputProblem(shareInputs[s.participantId] ?? "") !== null
+  );
+
   function updateShare(pid: ParticipantId, val: string) {
-    const parsed = parseUsdcInput(val);
+    setShareInputs((prev) => ({ ...prev, [pid]: val }));
+    const parsed = parseOptionalUsdc(val);
     setEditShares((prev) =>
-      prev.map((s) => (s.participantId === pid ? { ...s, amount: parsed ?? 0n } : s))
+      prev.map((s) => (s.participantId === pid ? { ...s, amount: parsed.ok ? parsed.value : 0n } : s))
     );
   }
 
@@ -611,7 +640,7 @@ function ExpenseDetail({
   }
 
   async function handleAdminEdit() {
-    if (!isSharesValid || !editReason.trim()) return;
+    if (!isSharesValid || hasShareProblem || !editReason.trim()) return;
     setSubmitting(true);
     setActionMsg(null);
     try {
@@ -769,11 +798,12 @@ function ExpenseDetail({
                   <div key={s.participantId} className="flex items-center gap-2">
                     <span className="text-sm text-stone-600 w-20 shrink-0">{name}</span>
                     <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      className="flex-1 border border-stone-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 tabular-nums"
-                      value={toDisplayNumber(s.amount)}
+                      type="text"
+                      inputMode="decimal"
+                      autoComplete="off"
+                      aria-invalid={!!usdcInputProblem(shareInputs[s.participantId] ?? "")}
+                      className={`flex-1 border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 tabular-nums ${usdcInputProblem(shareInputs[s.participantId] ?? "") ? "border-rose-400" : "border-stone-200"}`}
+                      value={shareInputs[s.participantId] ?? formatUsdcExact(s.amount)}
                       onChange={(e) => updateShare(s.participantId, e.target.value)}
                     />
                     <span className="text-xs text-stone-400 shrink-0">USDC</span>
@@ -802,7 +832,7 @@ function ExpenseDetail({
           />
           <button
             onClick={() => { void handleAdminEdit(); }}
-            disabled={!isSharesValid || !editReason.trim() || submitting}
+            disabled={!isSharesValid || hasShareProblem || !editReason.trim() || submitting}
             className="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium disabled:opacity-40 hover:bg-indigo-700 transition-colors"
           >
             {submitting ? t("submitting") : t("admin_submit_btn")}

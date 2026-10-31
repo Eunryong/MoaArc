@@ -17,41 +17,118 @@ import type {
 export const USDC_DECIMALS = 6;
 export const USDC_SCALE = 1_000_000n; // 1 USDC = 1_000_000 최소단위
 
-/** 사람이 읽을 수 있는 USDC 문자열 → 마이크로USDC bigint */
-export function parseUsdcInput(input: string): bigint | null {
+/** uint256 최대값 — 컨트랙트 금액 인자의 상한 (마이크로USDC 단위) */
+export const MAX_USDC_RAW = (1n << 256n) - 1n;
+
+export type UsdcParseFailure =
+  | "empty"              // 빈 입력
+  | "format"             // 숫자·소수점 외 문자, 지수 표기(1e3), 부호(+), 쉼표, 중복 소수점 등
+  | "negative"           // 음수
+  | "too_many_decimals"  // 소수점 이하 7자리 이상 (반올림/절사 없이 거부)
+  | "too_large";         // uint256 초과
+
+export type UsdcParseResult =
+  | { ok: true; value: bigint }
+  | { ok: false; reason: UsdcParseFailure };
+
+// "12", "12.", "12.5", ".5" 만 허용. 지수 표기·부호·쉼표·공백 포함 입력은 모두 거부.
+const USDC_INPUT_RE = /^(?:(\d+)(?:\.(\d*))?|\.(\d+))$/;
+const NEGATIVE_LOOKING_RE = /^-\d*\.?\d+$|^-\d+\.$/;
+
+/**
+ * 사람이 입력한 USDC 문자열 → 마이크로USDC bigint (정확히 0~6자리 소수만 허용).
+ * 소수점 이하가 7자리 이상이면 잘라내거나 반올림하지 않고 "too_many_decimals" 로 거부합니다
+ * (끝자리가 0 이어도 거부 — 입력 의도와 온체인 단위 불일치 방지).
+ */
+export function parseUsdcStrict(input: string): UsdcParseResult {
   const trimmed = input.trim();
-  if (!trimmed || trimmed === "") return null;
-  // "123.456" 형태 허용, 소수점 7자리 이상은 에러
-  const parts = trimmed.split(".");
-  if (parts.length > 2) return null;
-  const intPart = parts[0] ?? "0";
-  const fracPart = (parts[1] ?? "").slice(0, USDC_DECIMALS).padEnd(USDC_DECIMALS, "0");
-  // 정수 부분 검증
-  if (!/^\d+$/.test(intPart)) return null;
-  if (!/^\d+$/.test(fracPart)) return null;
-  try {
-    return BigInt(intPart) * USDC_SCALE + BigInt(fracPart);
-  } catch {
-    return null;
+  if (trimmed === "") return { ok: false, reason: "empty" };
+  const m = USDC_INPUT_RE.exec(trimmed);
+  if (!m) {
+    return { ok: false, reason: NEGATIVE_LOOKING_RE.test(trimmed) ? "negative" : "format" };
+  }
+  const whole = m[1] ?? "0";
+  const frac = m[2] ?? m[3] ?? "";
+  if (frac.length > USDC_DECIMALS) return { ok: false, reason: "too_many_decimals" };
+  const value = BigInt(whole) * USDC_SCALE + BigInt(frac.padEnd(USDC_DECIMALS, "0"));
+  if (value > MAX_USDC_RAW) return { ok: false, reason: "too_large" };
+  return { ok: true, value };
+}
+
+/** 하위 호환: 유효하면 bigint, 어떤 이유로든 유효하지 않으면 null (절대 잘라내지 않음). 오류 이유가 필요하면 parseUsdcStrict 사용 */
+export function parseUsdcInput(input: string): bigint | null {
+  const r = parseUsdcStrict(input);
+  return r.ok ? r.value : null;
+}
+
+/** 실패 이유 → i18n 키 */
+export function usdcFailureKey(
+  reason: UsdcParseFailure,
+): "err_amount_required" | "err_amount_format" | "err_amount_negative" | "err_amount_decimals" | "err_amount_too_large" {
+  switch (reason) {
+    case "empty": return "err_amount_required";
+    case "format": return "err_amount_format";
+    case "negative": return "err_amount_negative";
+    case "too_many_decimals": return "err_amount_decimals";
+    case "too_large": return "err_amount_too_large";
   }
 }
 
-/** 마이크로USDC bigint → "1,234.56" 형태 표시 문자열 */
-export function fmtUsdc(amount: bigint, digits = 2): string {
-  if (typeof amount !== "bigint") return "0.00";
+export type UsdcKey = ReturnType<typeof usdcFailureKey>;
+export type UsdcValidation = { ok: true; value: bigint } | { ok: false; key: UsdcKey };
+
+/** 0 보다 커야 하는 금액 (입금·이체·반납·지출 총액) */
+export function parsePositiveUsdc(input: string): UsdcValidation {
+  const r = parseUsdcStrict(input);
+  if (!r.ok) return { ok: false, key: usdcFailureKey(r.reason) };
+  if (r.value <= 0n) return { ok: false, key: "err_amount_required" };
+  return { ok: true, value: r.value };
+}
+
+/** 비어 있으면 0 으로 허용하는 선택 금액 (여행방 목표 예산, 분담 금액 칸) */
+export function parseOptionalUsdc(input: string): UsdcValidation {
+  if (input.trim() === "") return { ok: true, value: 0n };
+  const r = parseUsdcStrict(input);
+  return r.ok ? { ok: true, value: r.value } : { ok: false, key: usdcFailureKey(r.reason) };
+}
+
+/** 입력 도중 즉시 보여줄 경고: 비어 있지 않은데 형식이 잘못된 경우의 i18n 키 (빈 입력·0 은 null) */
+export function usdcInputProblem(input: string): UsdcKey | null {
+  if (input.trim() === "") return null;
+  const r = parseUsdcStrict(input);
+  return r.ok ? null : usdcFailureKey(r.reason);
+}
+
+/**
+ * 마이크로USDC bigint → 표시 문자열. 반올림·절사 없이 정확히 표시합니다.
+ *  - 소수점 이하는 최소 minDigits(기본 2)자리, 0 이 아닌 마이크로 단위가 있으면 최대 6자리까지
+ *    (뒤쪽 불필요한 0 은 minDigits 까지만 유지). 예: 1_000_000n → "1.00", 1n → "0.000001", 1_234_560n → "1.23456"
+ *  - 정수부는 천 단위 구분. Number 를 쓰지 않으므로 아무리 큰 bigint 도 정확합니다.
+ */
+export function fmtUsdc(amount: bigint, minDigits = 2): string {
+  if (typeof amount !== "bigint") return fmtUsdc(0n, minDigits);
   const isNeg = amount < 0n;
   const abs = isNeg ? -amount : amount;
   const whole = abs / USDC_SCALE;
-  const frac = abs % USDC_SCALE;
-  // 소수점 digits 자리로 반올림
-  const fracStr = frac.toString().padStart(USDC_DECIMALS, "0").slice(0, digits);
+  const min = Math.min(Math.max(Math.trunc(minDigits), 0), USDC_DECIMALS);
+  let frac = (abs % USDC_SCALE).toString().padStart(USDC_DECIMALS, "0");
+  let end = frac.length;
+  while (end > min && frac[end - 1] === "0") end -= 1;
+  frac = frac.slice(0, end);
   const wholeFormatted = whole.toLocaleString("ko-KR");
-  return `${isNeg ? "-" : ""}${wholeFormatted}.${fracStr}`;
+  return `${isNeg ? "-" : ""}${wholeFormatted}${frac ? `.${frac}` : ""}`;
 }
 
-/** 마이크로USDC bigint → number (표시 전용, 정산 계산에 사용 금지) */
-export function toDisplayNumber(amount: bigint): number {
-  return Number(amount) / 1_000_000;
+/**
+ * 입력칸 초기값/속성용 정확한 문자열 (천 단위 구분 없음, 뒤쪽 0 제거). parseUsdcStrict 와 왕복 가능.
+ * 예: 1_500_000n → "1.5", 1n → "0.000001", 2_000_000n → "2"
+ */
+export function formatUsdcExact(amount: bigint): string {
+  const isNeg = amount < 0n;
+  const abs = isNeg ? -amount : amount;
+  const whole = (abs / USDC_SCALE).toString();
+  const frac = (abs % USDC_SCALE).toString().padStart(USDC_DECIMALS, "0").replace(/0+$/, "");
+  return `${isNeg ? "-" : ""}${whole}${frac ? `.${frac}` : ""}`;
 }
 
 // ─── 지출 헬퍼 ─────────────────────────────────────────────────────────────
@@ -129,6 +206,7 @@ export function calcParticipantSummary(trip: Trip, pid: ParticipantId): Particip
       paidDeficit: 0n,
       netBalance: 0n,
       refundClaimed: false,
+      balancesStatus: "disabled",
     };
   }
   const confirmedBurden = getConfirmedBurden(trip, pid);
@@ -154,6 +232,7 @@ export function calcParticipantSummary(trip: Trip, pid: ParticipantId): Particip
     paidDeficit,
     netBalance,
     refundClaimed: p.refundClaimed,
+    balancesStatus: p.onchainStatus ?? "ok",
   };
 }
 

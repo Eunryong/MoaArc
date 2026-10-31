@@ -67,9 +67,26 @@ function assertDate(val: unknown, field: string): string {
   return val;
 }
 
-function assertBigIntStr(val: unknown, field: string): bigint {
-  try { const n = BigInt(val as string); if (n < 0n) throw new Error(); return n; }
-  catch { throw new RangeError(`${field}은 0 이상의 정수 문자열이어야 합니다.`); }
+/** uint256 최대값 — 컨트랙트 금액 상한 */
+const MAX_UINT256 = (1n << 256n) - 1n;
+
+/**
+ * 마이크로USDC 정수 문자열 검증. 10진 숫자만 허용합니다.
+ * BigInt() 생성자는 "0x10"(16진), " 12 "(공백), ""(→0n) 도 받아 주므로 사용 전에 정규식으로 먼저 거른다.
+ */
+export function assertBigIntStr(val: unknown, field: string): bigint {
+  if (typeof val !== "string" || !/^\d+$/.test(val)) {
+    throw new RangeError(`${field}은 0 이상의 정수 문자열이어야 합니다.`);
+  }
+  const n = BigInt(val);
+  if (n > MAX_UINT256) throw new RangeError(`${field}이 너무 큽니다.`);
+  return n;
+}
+
+export function assertTxHash(val: unknown, field: string): string {
+  if (typeof val !== "string" || !TX_HASH_RE.test(val))
+    throw new RangeError(`${field}은 0x + 64자리 hex 형식이어야 합니다.`);
+  return val.toLowerCase();
 }
 
 // ─── 여행방 목록 ──────────────────────────────────────────────────────────────
@@ -98,6 +115,23 @@ export async function createTrip(c: Context) {
   }
   if (chainId !== ACTIVE_CHAIN_ID) {
     return c.json({ error: `지원하지 않는 chainId=${chainId}. 서버 chainId=${ACTIVE_CHAIN_ID}` }, 400);
+  }
+
+  // txHash 형식 검증 — chain.ts에 넘기기 전 경계 검사
+  try { assertTxHash(txHash, "txHash"); } catch (e) {
+    return c.json({ error: (e as RangeError).message }, 400);
+  }
+
+  // contractAddress 형식 검증
+  try { assertAddr(contractAddress, "contractAddress"); } catch (e) {
+    return c.json({ error: (e as RangeError).message }, 400);
+  }
+
+  // participants displayName 길이 검증
+  for (const p of participants) {
+    if (typeof p.displayName === "string" && p.displayName.length > MAX_NAME) {
+      return c.json({ error: `participants[].displayName은 최대 ${MAX_NAME}자입니다.` }, 400);
+    }
   }
 
   let verified;
@@ -318,6 +352,23 @@ export async function approveExpense(c: Context) {
   if (!APPROVAL_ACTION.has(body.action)) {
     return c.json({ error: "action은 '승인' 또는 '수정요청' 이어야 합니다." }, 400);
   }
+  // reason 길이 검증
+  if (body.reason !== undefined && body.reason !== null) {
+    if (typeof body.reason !== "string" || body.reason.length > MAX_TEXT) {
+      return c.json({ error: `reason은 최대 ${MAX_TEXT}자입니다.` }, 400);
+    }
+  }
+  // newShares 주소·금액 검증
+  if (body.newShares) {
+    try {
+      (body.newShares).forEach((s, i) => {
+        assertAddr(s.address, `newShares[${i}].address`);
+        assertBigIntStr(s.amountUsdc, `newShares[${i}].amountUsdc`);
+      });
+    } catch (e) {
+      return c.json({ error: (e as RangeError).message }, 400);
+    }
+  }
 
   const expense = await repo.findExpenseById(expenseId, trip.id);
   if (!expense) return c.json({ error: "지출을 찾을 수 없습니다." }, 404);
@@ -417,6 +468,15 @@ export async function addTripParticipant(c: Context) {
   if (chainId !== ACTIVE_CHAIN_ID) {
     return c.json({ error: `지원하지 않는 chainId=${chainId}. 서버 chainId=${ACTIVE_CHAIN_ID}` }, 400);
   }
+
+  // txHash / contractAddress 형식 검증 — chain.ts에 넘기기 전 경계 검사
+  try { assertTxHash(txHash, "txHash"); } catch (e) {
+    return c.json({ error: (e as RangeError).message }, 400);
+  }
+  try { assertAddr(contractAddress, "contractAddress"); } catch (e) {
+    return c.json({ error: (e as RangeError).message }, 400);
+  }
+
   if (contractAddress.toLowerCase() !== trip.contractAddress.toLowerCase()) {
     return c.json({ error: "컨트랙트 주소가 이 여행방과 다릅니다." }, 400);
   }

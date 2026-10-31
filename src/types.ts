@@ -26,6 +26,15 @@ export type PaymentFlowType =
   | "community_return"
   | "personal_prepaid";
 
+/**
+ * 온체인 읽기 상태.
+ * - disabled: 읽기 불가 (레거시 방 / onchain tripId 없음)
+ * - loading : 첫 응답 대기 중
+ * - error   : 읽기 실패 (0n 으로 간주하지 말 것)
+ * - ok      : 온체인에서 실제로 읽은 값
+ */
+export type OnchainReadStatus = "disabled" | "loading" | "error" | "ok";
+
 export interface Participant {
   id: ParticipantId;
   name: string;
@@ -45,6 +54,11 @@ export interface Participant {
   paidDeficit: bigint;
   /** 환급 수령 완료 여부 */
   refundClaimed: boolean;
+  /**
+   * depositedAmount / allocatedBudget / spentFromBudget 의 온체인 읽기 상태.
+   * undefined = 로컬(시연) 데이터로 간주. "ok"가 아니면 위 세 필드의 0n은 "값 없음"이지 실제 0이 아닙니다.
+   */
+  onchainStatus?: OnchainReadStatus;
 }
 
 export type ExpenseCategory = "식비" | "숙박" | "교통" | "기타";
@@ -305,6 +319,8 @@ export interface ParticipantSummary {
    */
   netBalance: bigint;
   refundClaimed: boolean;
+  /** deposited/allocated/spent/netBalance 가 온체인에서 실제로 읽혔는지. "ok"가 아니면 표시하지 말 것 */
+  balancesStatus: OnchainReadStatus;
 }
 
 // ─── 일정 예산 요약 ──────────────────────────────────────────────────────────

@@ -95,6 +95,15 @@ bun install
 bun run dev
 ```
 
+## Session / Auth Architecture
+
+- `src/session.ts` — Pure session logic (SessionController, resolveSessionPhase, ScopeGuard)
+  - `DEFAULT_DISCONNECT_GRACE_MS = 1_000`: token cleared 1s after disconnected, to absorb chain-switch blink.
+  - **FIX (2025-05-30)**: `pending` (reconnecting) state now cancels the grace timer immediately.
+    Before: `disconnected → reconnecting → connected` could expire the timer during `pending` and delete the token, causing auto-logout after successful sign-in. After: all non-`disconnected` states (including `pending`) cancel the timer; if `pending` resolves back to `disconnected`, a fresh timer starts then.
+- `src/useWalletSession.ts` — React hook wrapping SessionController; layout effect runs before child passive effects.
+- 572/572 tests pass (including 2 new regression cases for the above fix).
+
 ## Contract Commands
 
 ```bash
