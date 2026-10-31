@@ -57,7 +57,7 @@ const ko: Record<I18nKeys, string> = {
   pending_expenses: "대기 중 지출",
   unconfirmed_badge: "건 미확정",
   target_budget: "목표 예산",
-  smart_contract: "스마트 컨트랙트 (V2)",
+  smart_contract: "MoaArcTreasury (v3)",
   onchain_settlement_status: "온체인 정산 상태",
   status_unknown: "알 수 없음",
   status_loading: "조회 중…",

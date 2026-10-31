@@ -61,7 +61,7 @@ const en = {
   pending_expenses: "Pending expenses",
   unconfirmed_badge: "unconfirmed",
   target_budget: "Target budget",
-  smart_contract: "Smart Contract (V2)",
+  smart_contract: "MoaArcTreasury (v3)",
   onchain_settlement_status: "On-chain settlement status",
   status_unknown: "Unknown",
   status_loading: "Loading…",
